@@ -124,6 +124,35 @@ sha256sum nginx.conf                                        # 宿主机
 docker compose exec nginx sha256sum /etc/nginx/nginx.conf   # 容器内，两者应一致
 ```
 
+### 重新部署 gateway 曾经会把整站打挂（已修）
+
+nginx 侧原本写的是 `upstream gateway_up { server gateway:8080; }`。
+`upstream` 里的主机名**只在 nginx 启动时解析一次，之后永久缓存**；而
+`docker compose up -d` 重建 gateway 容器会分配新的 IP，于是 nginx 一直去连那个
+已经不存在的旧地址，**每个请求都 502**，直到 nginx 也被重建。
+
+实测日志（gateway 从 `172.31.1.5` 变成 `172.31.1.7` 之后）：
+
+```
+connect() failed (111: Connection refused) while connecting to upstream,
+request: "POST /api/v1/auth/token HTTP/2.0", upstream: "http://172.31.1.5:8080/api/v1/auth/token"
+```
+
+症状很有迷惑性：`docker compose ps` 里 gateway 是 healthy，容器内
+`curl http://gateway:8080/api/v1/health` 也是 200，只有经过 nginx 才 502。
+
+已改成「变量 + resolver」，名字按 `valid=10s` 重新解析，网关重建后最多 10 秒自愈：
+
+```nginx
+resolver 127.0.0.11 valid=10s ipv6=off;
+set $gateway_up http://gateway:8080;
+location ... { proxy_pass $gateway_up; }
+```
+
+代价是失去 upstream 的 keepalive（每个请求新建一条连接），对这个规模可以忽略。
+注意 `127.0.0.11` 是 Docker 内置 DNS —— 如果哪天把 nginx 移出容器、直接在宿主机上跑，
+要把这个地址改成宿主机 `/etc/resolv.conf` 里的 DNS，否则解析失败会全站 502。
+
 ### 启动前的自检
 
 ```bash
