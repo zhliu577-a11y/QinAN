@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import secrets
 import tempfile
@@ -69,6 +71,21 @@ async def client(runtime):
 @pytest_asyncio.fixture
 async def session_factory(runtime):
     return get_sessionmaker()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _settle_background_callbacks(runtime):
+    """收干净终态收尾时在后台排队的回调投递。
+
+    _finalize 会 create_task 投递回调；测试既不等待也不清理时，这个任务会漂到
+    下一个测试里：既可能污染别人的断言（例如「只投递一次」），也会带着真实
+    httpx 去请求 callback_url，让测试莫名其妙地走网络、被超时拖慢。
+    """
+    yield
+    for task in list(runtime.dispatcher.callbacks._tasks):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 async def _ensure_user(username: str, password: str, quota: int = 30) -> None:
