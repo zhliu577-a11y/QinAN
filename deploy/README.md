@@ -17,7 +17,8 @@ cd deploy
 cp .env.example .env
 vim .env                      # 至少改 JWT_SECRET / 三个 OC*_PASSWORD / 域名
 mkdir -p certs
-# 把证书放好：certs/fullchain.pem、certs/privkey.pem
+# 把正式证书放好：certs/fullchain.pem、certs/privkey.pem
+# 本地演练没有域名怎么办 → 见下面「没有域名时怎么本地演练」
 docker compose up -d --build
 docker compose ps
 docker compose logs -f gateway
@@ -32,6 +33,44 @@ docker compose logs -f gateway
 ```bash
 openssl rand -hex 24          # 分别填给 OC1/OC2/OC3_PASSWORD
 ```
+
+### 拉取镜像（境内必做）
+
+Docker Hub 在境内直连不通（实测 `registry-1.docker.io` 请求超时）。不配加速器，
+`docker compose up --build` 会一直卡在拉取 `nginx` / `python` / `node` 三个基础镜像上。
+
+编辑 `/etc/docker/daemon.json`：
+
+```json
+{
+  "registry-mirrors": ["https://docker.m.daocloud.io"]
+}
+```
+
+```bash
+sudo systemctl restart docker
+docker info | grep -A2 'Registry Mirrors'     # 确认已生效
+```
+
+`https://docker.m.daocloud.io` 实测可取到本项目用到的三个基础镜像。
+若有阿里云账号，可在控制台「容器镜像服务 → 镜像加速器」拿到专属地址，两者可并列写进数组。
+
+镜像内的依赖下载已默认走国内源（`opencode/Dockerfile` 用 `registry.npmmirror.com`，
+`gateway/Dockerfile` 用清华 PyPI），不需要额外配置。
+
+### 没有域名时怎么本地演练
+
+`nginx.conf` 强制 TLS：证书文件不存在时容器会直接启动失败，且 80 端口只做 301 跳转到 443。
+在没有域名、没有正式证书的 VM 里试跑，用自签证书：
+
+```bash
+chmod +x ./gen-self-signed-cert.sh      # 从 Windows 提交过来时可能没有执行位
+./gen-self-signed-cert.sh 192.168.1.50 agent.example.com
+docker compose up -d --build
+```
+
+参数传域名或 IP 都行（脚本按格式自动写进 SAN）。手机首次访问需手动信任该证书，
+自签证书仅用于演练，生产环境务必换成正式证书。
 
 ## 3. 构建顺序（重要）
 
