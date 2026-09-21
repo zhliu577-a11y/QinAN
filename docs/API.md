@@ -176,9 +176,14 @@ App 后端用双方约定的共享密钥签名，无需用户二次登录。
 {
   "task_id": "tsk_9f3a1c",
   "status": "failed",
-  "error": { "code": "FETCH_BLOCKED", "message": "目标站点拒绝抓取或需要脚本渲染" }
+  "error": { "code": "UPSTREAM_ERROR", "message": "智能体后端异常" }
 }
 ```
+
+**抓取失败不是任务失败**：目标站点拒绝、超时、需要脚本渲染时，webfetch 的结果
+会作为普通工具结果交回模型，任务通常会正常 `succeeded`，只是 `source.fetched_chars`
+为 `null`（见 5 节），由模型在 `result_md` 里说明抓不到。因此没有单独的
+`FETCH_BLOCKED` 错误码——调用方判断依据是 `fetched_chars`，不是 `error`。
 
 ### 5.2 历史列表
 
@@ -292,7 +297,6 @@ Content-Type: application/json
 | 429 | `RATE_LIMITED` | 请求过于频繁，看 `Retry-After` |
 | 502 | `UPSTREAM_ERROR` | 智能体后端异常，可重试 |
 | 504 | `TIMEOUT` | 执行超时 |
-| 502 | `FETCH_BLOCKED` | 目标页面无法抓取（需脚本渲染 / 站点拒绝 / 出口受限） |
 
 限流响应同时带 `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`。
 
@@ -317,7 +321,8 @@ Content-Type: application/json
 1. 用沙箱账号走通 `/auth/token` → `/tasks` → `/events` → `GET /tasks/{id}` 全链路
 2. 验证 `Idempotency-Key` 重发不产生重复任务
 3. 验证断网重连后能补齐增量片段
-4. 处理 429（`QUEUE_FULL` / `QUOTA_EXCEEDED`）与 `FETCH_BLOCKED` 的界面提示
+4. 处理 429（`QUEUE_FULL` / `QUOTA_EXCEEDED`）的界面提示；
+   抓取不成功时看 `source.fetched_chars === null`，而不是等一个错误码
 5. 实现 `callback_url` 并校验 `X-Agent-Signature`
 6. 确认长文本（接近 20 万字符）与超长 URL 的客户端校验
 
