@@ -1,4 +1,4 @@
-name: agent-gateway
+﻿name: agent-gateway
 
 # 暴露面：只有 nginx 映射端口；gateway 与 opencode 仅在 internal 网络内，宿主机也连不上。
 #
@@ -28,6 +28,22 @@ x-opencode-model-env: &opencode-model-env
   MODEL_API_KEY: ${MODEL_API_KEY:-}
 
 services:
+  # 模拟模型服务：只在需要「不依赖任何外部模型」跑通链路时启动。
+  # 用 profile 隔离，默认 `docker compose up -d` 不会拉起它，生产环境不会误启。
+  #   docker compose --profile mock up -d
+  # 启动后把 .env 里 MODEL_BASE_URL 指到 http://mock-model:8000/v1 即可。
+  mock-model:
+    profiles: ["mock"]
+    image: agent-mock-model:local
+    build:
+      context: ./mock-model
+      dockerfile: Dockerfile
+    container_name: agent-mock-model
+    restart: unless-stopped
+    networks:
+      - internal
+    # 同样不映射端口，只在内部网络里供 opencode 访问
+
   nginx:
     image: nginx:1.27-alpine
     container_name: agent-nginx
@@ -87,7 +103,7 @@ services:
       OPENCODE_SERVER_PASSWORD: ${OC1_PASSWORD}
       HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
-      NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-2,opencode-3
+      NO_PROXY: localhost,127.0.0.1,gateway,nginx,mock-model,opencode-2,opencode-3
     volumes:
       - workspace:/srv/agent/workspace
       - oc1-data:/home/app/.local/share
@@ -100,7 +116,7 @@ services:
       OPENCODE_SERVER_PASSWORD: ${OC2_PASSWORD}
       HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
-      NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-1,opencode-3
+      NO_PROXY: localhost,127.0.0.1,gateway,nginx,mock-model,opencode-1,opencode-3
     volumes:
       - workspace:/srv/agent/workspace
       - oc2-data:/home/app/.local/share
@@ -113,7 +129,7 @@ services:
       OPENCODE_SERVER_PASSWORD: ${OC3_PASSWORD}
       HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
-      NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-1,opencode-2
+      NO_PROXY: localhost,127.0.0.1,gateway,nginx,mock-model,opencode-1,opencode-2
     volumes:
       - workspace:/srv/agent/workspace
       - oc3-data:/home/app/.local/share
