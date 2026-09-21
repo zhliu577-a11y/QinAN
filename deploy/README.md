@@ -72,6 +72,24 @@ docker compose up -d --build
 参数传域名或 IP 都行（脚本按格式自动写进 SAN）。手机首次访问需手动信任该证书，
 自签证书仅用于演练，生产环境务必换成正式证书。
 
+要让同网段的手机连上演练环境，还得在宿主机放行转发端口（Windows 为例，
+管理员 PowerShell 执行一次即可）：
+
+```powershell
+New-NetFirewallRule -DisplayName 'QinAN VM gateway HTTP 8080' `
+    -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8080 -Profile Any
+New-NetFirewallRule -DisplayName 'QinAN VM gateway HTTPS 8443' `
+    -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8443 -Profile Any
+```
+
+然后手机浏览器访问 `https://<宿主机局域网IP>:8443/api/v1/health`，能返回
+`{"status":"ok",...}` 就说明链路通了。注意 80 端口只做 301 跳转，所以要访问
+443 对应的那个映射端口（示例里是 8443）。
+
+另外，宿主机上如果有别的进程占着 `127.0.0.1:8080`，本机用 `127.0.0.1` 测会打到
+那个进程而不是 VM（VirtualBox 的 NAT 监听绑在 `0.0.0.0`，更具体的 `127.0.0.1`
+绑定优先）。这种情况下用宿主机的局域网 IP 测即可，手机访问不受影响。
+
 ## 3. 构建顺序（重要）
 
 网关代码（M2/M3）已经落地，`docker compose up -d --build` 可以整体启动。
