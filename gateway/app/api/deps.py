@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated, Optional
 
-from fastapi import Depends, Header, Query, Request
+from fastapi import Depends, Header, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
@@ -86,10 +86,3 @@ async def require_admin_token(
         raise forbidden("管理接口未启用")
     if x_admin_token != expected:
         raise forbidden("管理令牌不正确")
-
-
-def client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else ""

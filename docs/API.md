@@ -298,7 +298,14 @@ Content-Type: application/json
 | 502 | `UPSTREAM_ERROR` | 智能体后端异常，可重试 |
 | 504 | `TIMEOUT` | 执行超时 |
 
-限流响应同时带 `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`。
+429 有两种来源，App 要分开处理：
+
+- **网关返回的 429**（`QUOTA_EXCEEDED` / `QUEUE_FULL` / `RATE_LIMITED`）：标准 JSON 错误体，
+  带 `Retry-After`。按 `code` 给用户不同文案即可。
+- **nginx 返回的 429**（请求频率超过 `limit_req`）：body 是 nginx 的 HTML 错误页，
+  **没有** `Retry-After`。App 见到非 JSON 的 429 应按固定间隔退避重试，不要当业务错误展示。
+
+不提供 `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`（未实现）。
 
 ## 9. 健康检查
 

@@ -449,15 +449,39 @@ docker compose up -d --build      # 重新构建并启动
 极端情况下（几十人同时提交）会让后来者等很久。真出现这种情况，
 优先加实例，或者给全局队列加一个上限并在超限时返回明确的忙时错误。
 
-### 提交接口是按 IP 限流的
+### 限流按凭证（token）分桶
 
-`nginx.conf` 里 `ip_submit` 按 `$binary_remote_addr` 限流，不是按用户。
-如果 App 后端做代理转发，或者所有手机都在同一个出口 NAT 后面，
-这些用户会被算成「同一个 IP」而互相挤占额度。当前配置是
-`rate=120r/m burst=30`，够同一 IP 后 20 人同时提交；
-但如果你的 App 是这种架构、并且并发会更高，记得同步调大这个值。
+`nginx.conf` 里的限流键是 `$rl_key`：带 `Authorization: Bearer ...` 的请求按 token 分桶，
+一人一个桶、互不挤占；没带凭证的请求（登录、健康检查、`/openapi.json`）退回按来源 IP 分桶。
 
-另外 `/api/v1/` 下的查询接口共用 `ip_general`（120r/m burst 40）。
+| 桶 | 键 | 速率 | 位置 |
+|---|---|---|---|
+| `rl_general` | token / 来源 IP | 120 r/m，burst 40 | `/api/v1/` 下的查询、`/api/v1/ws/` |
+| `rl_submit` | token / 来源 IP | 120 r/m，burst 30 | `POST /api/v1/tasks` |
+| `rl_sse` | token / 来源 IP | 60 r/m，burst 20 | `GET /api/v1/tasks/{id}/events` |
+| `rl_auth` | 来源 IP | 20 r/m，burst 10 | `POST /api/v1/auth/{token,exchange,refresh}` |
+
+两点必须知道的前提：
+
+- **按凭证分桶的前提是「一人一个 token」。** 如果 App 后端把所有用户的请求
+  都用同一个 service token 转发，那这些用户仍然会被算成同一个人、互相挤占额度。
+  这时要么给每个终端各自换取 token（推荐，模式 B 的 `/auth/exchange` 就是为此设计的），
+  要么同步调大 `rl_submit`。
+- **重新登录 / 换 Token 会拿到一个新桶**，等于把自己的额度重置。这条路径需要凭据
+  才能走，所以重置次数被「能拿到多少凭据」限住，不构成绕过。
+- **别拿本机压测的 429 比例推断线上行为。** 实测：外部客户端的来源 IP 是保留的
+  （宿主机 curl 经 `127.0.0.1:8443` 进来，`access.log` 记到 `10.0.2.2`），
+  但从本机经发布端口发起的请求会被 docker-proxy/DNAT 折叠成网桥网关 `172.31.1.1`，
+  所有本机流量共用一个桶。在 VM 里自测高并发时，看到的是被折叠后的结果。
+
+**429 有两种来源，App 必须分开处理：**
+
+- 网关返回的 429：JSON body `{"error":{"code":"QUOTA_EXCEEDED"|"QUEUE_FULL"|"RATE_LIMITED",...}}`，
+  带 `Retry-After`，可以按 `code` 给用户不同文案。**没有** `X-RateLimit-*` 头。
+- nginx 返回的 429：body 是 nginx 的 HTML 错误页，**没有** `Retry-After`。
+  见到这种就只能按固定间隔退避重试，不要拿它当业务错误展示。
+
+另外 `/api/v1/` 下的查询接口共用 `rl_general`（120r/m burst 40）。
 App 应该用 SSE 拿进度而不是轮询任务状态：20 个客户端每秒轮询一次就是
 1200 次/分钟，会被限流挡掉。SSE 的设计路径不受影响。
 
@@ -468,5 +492,5 @@ App 应该用 SSE 拿进度而不是轮询任务状态：20 个客户端每秒�
 
 - **App 必须用 `GET /api/v1/tasks/{id}/events` 拿进度**，不要轮询状态接口。
   这是给 App 开发方的硬性集成要求，不是建议。
-- SSE 已单独使用 `ip_sse` 限流桶（60r/m burst 20），不会再被轮询挤占；
+- SSE 已单独使用 `rl_sse` 限流桶（60r/m burst 20），不会再被轮询挤占；
   但轮询本身仍会把自己打进 429，那不是服务端能兜住的。
