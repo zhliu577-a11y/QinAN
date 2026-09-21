@@ -249,7 +249,7 @@ class Dispatcher:
         self.pool.mark_busy(instance, task.id)
         self._buffers[task.id] = []
         self._usage[task.id] = {"tokens_in": 0, "tokens_out": 0, "cost": 0.0}
-        self._fetch[task.id] = {"chars": 0, "title": None}
+        self._fetch[task.id] = {"chars": 0, "title": None, "calls": 0}
 
         # 用条件更新「认领」任务，不要先读后写。先读后写会留下竞态窗口：
         # 用户在排队期间取消、取消事务先提交，这里随后的无条件写会把 canceled
@@ -400,13 +400,17 @@ class Dispatcher:
         """记录 webfetch 实际抓到的正文长度与标题。
 
         一个任务可能抓多次（模型自己决定），所以按次累加而不是覆盖。
+
+        calls 记录成功完成的抓取次数：这样 fetched_chars 才能区分
+        「一次都没抓成」（None）与「抓了但正文是空的」（0）。
         """
         found = self.pool.task_of_session(session_id)
         if found is None:
             return
         _, task_id = found
-        record = self._fetch.setdefault(task_id, {"chars": 0, "title": None})
+        record = self._fetch.setdefault(task_id, {"chars": 0, "title": None, "calls": 0})
         record["chars"] = int(record["chars"]) + max(chars, 0)
+        record["calls"] = int(record.get("calls") or 0) + 1
         if title and not record["title"]:
             record["title"] = title
 
@@ -475,6 +479,9 @@ class Dispatcher:
         判定与写入必须是同一条 UPDATE。先读后写的写法在「取消」与「完成」几乎同时
         到达时会互相覆盖：取消先提交 canceled，随后完成的路径读到的是过期快照，
         又把终态写回 succeeded。
+
+        返回值是契约的一部分：True 表示本次调用真的推到了终态，
+        False 表示终态已被别的路径抢走。调用方据此决定要不要补发 abort。
         """
         async with get_sessionmaker()() as db:
             task = await db.get(Task, task_id)
@@ -503,7 +510,7 @@ class Dispatcher:
             fetch = self._fetch.pop(task_id, None)
             if task.kind == "text" and task.fetched_chars is None:
                 values["fetched_chars"] = len(task.input_text or "")
-            elif task.kind == "url" and fetch and fetch["chars"]:
+            elif task.kind == "url" and fetch and fetch.get("calls"):
                 values["fetched_chars"] = fetch["chars"]
                 title = fetch["title"]
                 # webfetch 的 title 就是 URL 本身时没有信息量，不写进 source
@@ -539,6 +546,7 @@ class Dispatcher:
 
         await self._emit_terminal(task_id, status, error_code, error_message)
         self.bus.forget(task_id)
+        return True
 
     async def _emit_terminal(
         self,

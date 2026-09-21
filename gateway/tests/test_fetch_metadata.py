@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import secrets
+
 import pytest
+from app.models import Task, User
 from app.services.dispatcher import Dispatcher
 from app.services.event_relay import EventRelay, _clean_fetch_title
+from sqlalchemy import select
 
 
 class _StubDispatcher:
@@ -77,6 +81,44 @@ async def test_completed_webfetch_is_reported_once():
     assert len(dispatcher.calls) == 1
 
 
+async def test_reused_call_id_across_sessions_is_still_reported():
+    """回归：callID 由模型生成，只在单次响应内唯一。
+
+    mock 固定回 call_mock_1、真实模型也常见 call_0，所以第二个任务起
+    会带着同一个 callID 再来一次。曾经的全局去重集合把它当成重复，
+    于是从第二个 url 任务开始 fetched_chars 全是 None。
+    """
+    relay, dispatcher = _relay()
+    await relay._handle_tool("ses_1", _part("completed", output="正文" * 10))
+    await relay._handle_tool("ses_2", _part("completed", output="正文" * 10))
+
+    assert [(session, chars) for session, chars, _ in dispatcher.calls] == [
+        ("ses_1", 20),
+        ("ses_2", 20),
+    ]
+
+
+async def test_second_fetch_in_same_session_is_counted():
+    """同一会话里模型抓第二次网页，partID 不同就该再记一次。"""
+    relay, dispatcher = _relay()
+    await relay._handle_tool("ses_1", _part("completed", output="a" * 10))
+    second = {**_part("completed", output="b" * 20), "id": "prt_2"}
+    await relay._handle_tool("ses_1", second)
+
+    assert [chars for _, chars, _ in dispatcher.calls] == [10, 20]
+
+
+async def test_forget_session_releases_dedup_entries():
+    relay, dispatcher = _relay()
+    await relay._handle_tool("ses_1", _part("completed", output="正文" * 10))
+    assert relay._seen_fetch_total == 1
+
+    relay._forget_session("ses_1")
+
+    assert relay._seen_fetch_total == 0
+    assert relay._seen_fetch_parts == {}
+
+
 async def test_unfinished_or_other_tool_is_ignored():
     relay, dispatcher = _relay()
 
@@ -94,8 +136,66 @@ async def test_handle_fetch_accumulates_per_task():
 
     await dispatcher.handle_fetch("ses_1", 100, "https://a.com/")
     await dispatcher.handle_fetch("ses_1", 50, "https://b.com/")
-    assert dispatcher._fetch["tsk_1"] == {"chars": 150, "title": "https://a.com/"}
+    assert dispatcher._fetch["tsk_1"] == {
+        "chars": 150,
+        "title": "https://a.com/",
+        "calls": 2,
+    }
 
     # 会话不在池里（任务已终态或不属于本进程）时不应写入
     await dispatcher.handle_fetch("ses_missing", 10, None)
     assert list(dispatcher._fetch) == ["tsk_1"]
+
+
+async def _user_id(session_factory, username: str) -> int:
+    async with session_factory() as db:
+        return (await db.execute(select(User).where(User.username == username))).scalar_one().id
+
+
+async def _running_url_task(session_factory, user_id: int) -> str:
+    task_id = "tsk_" + secrets.token_hex(12)
+    async with session_factory() as db:
+        db.add(
+            Task(
+                id=task_id,
+                user_id=user_id,
+                kind="url",
+                input_url="https://example.com/article",
+                status="running",
+            )
+        )
+        await db.commit()
+    return task_id
+
+
+async def test_finalize_writes_fetched_chars_for_url_task(
+    runtime, session_factory, new_user
+):
+    username, _ = await new_user()
+    user_id = await _user_id(session_factory, username)
+    task_id = await _running_url_task(session_factory, user_id)
+
+    runtime.dispatcher._fetch[task_id] = {"chars": 8213, "title": "示例文章", "calls": 1}
+    assert await runtime.dispatcher._finalize(task_id, "succeeded", result_md="摘要") is True
+
+    async with session_factory() as db:
+        row = await db.get(Task, task_id)
+        assert row.fetched_chars == 8213
+        assert row.source_title == "示例文章"
+
+
+async def test_finalize_marks_empty_fetch_as_zero(runtime, session_factory, new_user):
+    """抓取成功但正文为空应写 0；一次都没抓成才留 None。"""
+    username, _ = await new_user()
+    user_id = await _user_id(session_factory, username)
+
+    empty = await _running_url_task(session_factory, user_id)
+    runtime.dispatcher._fetch[empty] = {"chars": 0, "title": None, "calls": 1}
+    await runtime.dispatcher._finalize(empty, "succeeded", result_md="摘要")
+
+    never = await _running_url_task(session_factory, user_id)
+    await runtime.dispatcher._finalize(never, "succeeded", result_md="摘要")
+
+    async with session_factory() as db:
+        assert (await db.get(Task, empty)).fetched_chars == 0
+        assert (await db.get(Task, never)).fetched_chars is None

@@ -158,3 +158,67 @@ async def test_defer_does_not_resurrect_canceled_task(runtime, session_factory, 
         row = await db.get(Task, task_id)
         assert row.status == "canceled"
         assert row.retried is False
+
+
+async def test_finalize_reports_true_when_it_wins(runtime, session_factory, new_user):
+    """_finalize 的返回值是 cancel 判断「终态有没有被抢走」的依据。
+
+    成功路径漏写 return True 会让 cancel 误判成「已被别的路径落定」，
+    于是提前 return，正在跑的会话不会被 abort，模型白跑完还烧 token。
+    """
+    username, _ = await new_user()
+    user_id = await _user_id(session_factory, username)
+    task_id = "tsk_" + secrets.token_hex(12)
+
+    async with session_factory() as db:
+        db.add(
+            Task(
+                id=task_id,
+                user_id=user_id,
+                kind="text",
+                input_text="返回值契约",
+                status="running",
+            )
+        )
+        await db.commit()
+
+    assert await runtime.dispatcher._finalize(task_id, "succeeded", result_md="结果") is True
+    assert await runtime.dispatcher._finalize(task_id, "succeeded", result_md="结果") is False
+
+
+async def test_cancel_aborts_inflight_session(runtime, session_factory, new_user):
+    """取消正在执行的任务，必须把上游会话 abort 掉，别让模型白跑完。"""
+    username, _ = await new_user()
+    user_id = await _user_id(session_factory, username)
+    task_id = "tsk_" + secrets.token_hex(12)
+    session_id = "ses_" + secrets.token_hex(6)
+
+    instance = runtime.pool.idle_instances()[0]
+    aborted: list[str] = []
+
+    async def fake_abort(target: str) -> None:
+        aborted.append(target)
+
+    original = instance.client.abort
+    instance.client.abort = fake_abort  # type: ignore[method-assign]
+    try:
+        async with session_factory() as db:
+            db.add(
+                Task(
+                    id=task_id,
+                    user_id=user_id,
+                    kind="text",
+                    input_text="取消要真的停",
+                    status="running",
+                    instance_id=instance.id,
+                    session_id=session_id,
+                )
+            )
+            await db.commit()
+        instance.sessions[session_id] = task_id
+
+        assert await runtime.dispatcher.cancel(task_id) == "canceled"
+    finally:
+        instance.client.abort = original  # type: ignore[method-assign]
+
+    assert aborted == [session_id], "取消后必须 abort 上游会话"

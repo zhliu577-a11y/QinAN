@@ -25,8 +25,9 @@ TOOL_PART = "tool"
 WEBFETCH_TOOL = "webfetch"
 # 只用于记录 partID -> part.type 的映射；超过上限说明有会话没正常收到 session.idle
 MAX_TRACKED_PARTS = 4096
-# 已计入的 webfetch 调用 ID，避免同一部件在 pending/running/completed 之间反复上报
-MAX_TRACKED_CALLS = 4096
+# 已计入的 webfetch 部件 ID 上限（按会话分组存放，只在这个总数上封顶），
+# 避免同一部件在 pending/running/completed 之间反复上报
+MAX_TRACKED_FETCH_PARTS = 4096
 
 
 class EventRelay:
@@ -36,7 +37,8 @@ class EventRelay:
         self._tasks: list[asyncio.Task[None]] = []
         self._part_types: dict[str, str] = {}
         self._parts_by_session: dict[str, set[str]] = {}
-        self._seen_fetch_calls: set[str] = set()
+        self._seen_fetch_parts: dict[str, set[str]] = {}
+        self._seen_fetch_total = 0
         self._closed = False
 
     async def start(self) -> None:
@@ -157,20 +159,32 @@ class EventRelay:
         """把 webfetch 实际抓到的正文长度记到任务上。
 
         同一个工具部件会随 pending → running → completed 多次推送，
-        且每次都是全量 part，所以只在 completed 时计一次，并按 callID 去重。
+        且每次都是全量 part，所以只在 completed 时计一次。
+
+        去重键用 opencode 生成的 partID，并按会话分组。callID 是模型自己生成的，
+        只在单次响应内唯一（mock 固定回 call_mock_1，真实模型也常见 call_0），
+        拿它做全局去重会让第二个任务起的所有抓取都被静默丢掉。
         """
         if part.get("tool") != WEBFETCH_TOOL:
             return
         state = part.get("state") or {}
         if state.get("status") != "completed":
             return
-        call_id = str(part.get("callID") or part.get("id") or "")
-        if not call_id or call_id in self._seen_fetch_calls:
+        part_id = str(part.get("id") or part.get("callID") or "")
+        if not part_id:
             return
-        if len(self._seen_fetch_calls) >= MAX_TRACKED_CALLS:
-            logger.warning("webfetch 调用表超过 %d 条，整体清空", MAX_TRACKED_CALLS)
-            self._seen_fetch_calls.clear()
-        self._seen_fetch_calls.add(call_id)
+        seen = self._seen_fetch_parts.setdefault(session_id, set())
+        if part_id in seen:
+            return
+        if self._seen_fetch_total >= MAX_TRACKED_FETCH_PARTS:
+            logger.warning(
+                "webfetch 部件表超过 %d 条，整体清空", MAX_TRACKED_FETCH_PARTS
+            )
+            self._seen_fetch_parts.clear()
+            self._seen_fetch_total = 0
+            seen = self._seen_fetch_parts.setdefault(session_id, set())
+        seen.add(part_id)
+        self._seen_fetch_total += 1
 
         output = state.get("output")
         chars = len(output) if isinstance(output, str) else 0
@@ -198,6 +212,7 @@ class EventRelay:
     def _forget_session(self, session_id: str) -> None:
         for part_id in self._parts_by_session.pop(session_id, ()):
             self._part_types.pop(part_id, None)
+        self._seen_fetch_total -= len(self._seen_fetch_parts.pop(session_id, ()))
 
 
 def _clean_fetch_title(title: Any) -> str | None:
