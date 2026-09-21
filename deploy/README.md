@@ -102,6 +102,28 @@ docker compose logs -f opencode-1
 
 整体启动时 nginx 会等 `gateway` 通过健康检查（`GET /api/v1/health`）后再开放流量。
 
+### 改完 nginx.conf 记得重建容器
+
+`nginx.conf` 是以**单文件** bind mount 挂进容器的。改完之后只执行
+`docker compose exec nginx nginx -s reload` 是**没用的**：reload 只是重新读取
+容器里挂着的那个 inode，而 git pull 与编辑器保存都是「写新文件再 rename」，
+旧 inode 已被 unlink，于是它一直读旧内容——`nginx -T` 会显示旧值，
+但 `nginx -t` 仍然报 successful，很容易误判成已经生效。
+
+配置改动必须重建容器：
+
+```bash
+docker compose up -d --force-recreate nginx
+```
+
+只跑 `docker compose up -d` 也不够：挂载文件的内容变化不在 compose 的配置哈希里，
+它不会认为需要重建。改完可以用这条确认容器里读到的就是新文件：
+
+```bash
+sha256sum nginx.conf                                        # 宿主机
+docker compose exec nginx sha256sum /etc/nginx/nginx.conf   # 容器内，两者应一致
+```
+
 ### 启动前的自检
 
 ```bash
@@ -313,3 +335,36 @@ docker compose up -d --build      # 重新构建并启动
 - 如果拉基础镜像慢，给 Docker 配国内镜像加速器
 - `nginx:1.27-alpine` 与 `python:3.12-slim` 也建议走加速器
 - 需要抓境外网页时，在 `.env` 里填 `FETCH_HTTP_PROXY` / `FETCH_HTTPS_PROXY`，只有 opencode 实例会用到
+
+## 11. 容量实测（3 实例 / 4 vCPU 虚拟机）
+
+20 个用户同时提交、真实模型（非 MOCK）实测：
+
+| 指标 | 实测值 |
+|---|---|
+| 提交成功率 | 20 / 20 |
+| 全部完成耗时 | 18.7s |
+| 吞吐 | ≈ 1.07 任务/秒 |
+| 单任务平均耗时 | 2.3s |
+| 实例分布 | oc-1 7 个、oc-2 7 个、oc-3 6 个 |
+
+吞吐基本被模型时延锁死：单任务约 2.3s，3 个实例并行，理论上限约 3/2.3 ≈ 1.3 任务/秒，
+实测 1.07 与之相符。所以要提高并发能力，**加实例是线性有效的**，
+瓶颈不在网关也不在 nginx。按每人每天提交几次算，3 个实例对 20 人绰绰有余。
+
+要注意队列上限：20 个任务里有 17 个排在队列里等实例。业务侧的
+`MAX_QUEUE_DEPTH_PER_USER=3` 只限制单个用户，全局队列没有上限，
+极端情况下（几十人同时提交）会让后来者等很久。真出现这种情况，
+优先加实例，或者给全局队列加一个上限并在超限时返回明确的忙时错误。
+
+### 提交接口是按 IP 限流的
+
+`nginx.conf` 里 `ip_submit` 按 `$binary_remote_addr` 限流，不是按用户。
+如果 App 后端做代理转发，或者所有手机都在同一个出口 NAT 后面，
+这些用户会被算成「同一个 IP」而互相挤占额度。当前配置是
+`rate=120r/m burst=30`，够同一 IP 后 20 人同时提交；
+但如果你的 App 是这种架构、并且并发会更高，记得同步调大这个值。
+
+另外 `/api/v1/` 下的查询接口共用 `ip_general`（120r/m burst 40）。
+App 应该用 SSE 拿进度而不是轮询任务状态：20 个客户端每秒轮询一次就是
+1200 次/分钟，会被限流挡掉。SSE 的设计路径不受影响。
