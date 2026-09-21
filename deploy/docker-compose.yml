@@ -1,4 +1,4 @@
-﻿name: agent-gateway
+name: agent-gateway
 
 # 暴露面：只有 nginx 映射端口；gateway 与 opencode 仅在 internal 网络内，宿主机也连不上。
 #
