@@ -8,6 +8,11 @@ name: agent-gateway
 # 注意：三个实例共用同一个镜像 tag，因此 build 只写在 opencode-1 上。
 # 若每个服务都写 build，compose 会并行构建并抢写同一个 tag，报
 # "image agent-opencode:local already exists"。
+#
+# 注意：opencode 的配置（opencode.json、agents/*.md）在构建期由
+# opencode/Dockerfile 打进镜像，这里不再 bind mount 配置目录。
+# 只读挂载会让 opencode 启动写 .gitignore 时 EROFS，实例 bootstrap 失败。
+# 改配置后需要 rebuild 才能生效：docker compose up -d --build opencode-1
 
 x-opencode-base: &opencode-base
   image: agent-opencode:local
@@ -84,7 +89,6 @@ services:
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
       NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-2,opencode-3
     volumes:
-      - ../opencode/config:/home/app/.config/opencode:ro
       - workspace:/srv/agent/workspace
       - oc1-data:/home/app/.local/share
 
@@ -98,7 +102,6 @@ services:
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
       NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-1,opencode-3
     volumes:
-      - ../opencode/config:/home/app/.config/opencode:ro
       - workspace:/srv/agent/workspace
       - oc2-data:/home/app/.local/share
 
@@ -112,7 +115,6 @@ services:
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
       NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-1,opencode-2
     volumes:
-      - ../opencode/config:/home/app/.config/opencode:ro
       - workspace:/srv/agent/workspace
       - oc3-data:/home/app/.local/share
 
