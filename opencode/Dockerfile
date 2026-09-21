@@ -14,7 +14,10 @@ RUN npm config set registry "${NPM_REGISTRY}" \
  && npm cache clean --force \
  && opencode --version
 
-RUN useradd --create-home --uid 1000 --shell /bin/bash app \
+# node 官方镜像自带 UID/GID 1000 的 node 用户，直接 useradd --uid 1000 会失败。
+# 这里把它改名为 app：保留 1000，命名卷首次挂载时才能继承正确的属主。
+RUN usermod --login app --home /home/app --move-home --shell /bin/bash node \
+ && groupmod --new-name app node \
  && mkdir -p /srv/agent/workspace \
  && chown -R app:app /srv/agent /home/app
 
