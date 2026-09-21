@@ -1,4 +1,9 @@
-"""管理接口，只在内网可达（nginx 已限制 /internal/ 的来源网段）。"""
+"""管理接口，只在 internal 网络内可达。
+
+nginx 对 `/internal/` 是 `deny all`：端口经 docker 发布后 $remote_addr 是网桥网关
+而不是真实客户端，所以「只允许某个来源网段」在 nginx 层表达不了，干脆完全不对公网
+暴露。调用方式见 deploy/README.md：`docker compose exec gateway curl ...`。
+"""
 
 from __future__ import annotations
 

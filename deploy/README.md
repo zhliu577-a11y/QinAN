@@ -301,7 +301,7 @@ docker compose exec opencode-1 \
 
 密钥统一走环境变量，不要用容器内 `opencode auth login`：配置里已显式指定 `apiKey`，会盖掉登录凭据。
 
-### 5.0 模拟覆盖不到的东西（别被"全绿"骗了）
+### 模拟覆盖不到的东西（别被"全绿"骗了）
 
 默认配置走模拟模型时，下面这些**一定是好的**，别浪费时间验证：
 消息链路、排队与派发、SSE 增量、任务状态流转、取消、配额、`source` 字段（含
@@ -315,7 +315,7 @@ docker compose exec opencode-1 \
 | **`usage` 里的 tokens 与 cost** | 数字是按真实单价乘**编造的** token 数，`cost` 看着很像真的却纯属虚构 | 只能以真实模型返回为准，**不要拿它做预算或计费** |
 | **任务超时回收（180s）** | 模拟任务 1~2 秒就结束，永远到不了超时 | 临时调小 `TASK_TIMEOUT_SECONDS` 跑一次，或等真实长任务 |
 | **抓取失败的处理** | 模拟下 webfetch 永远成功 | 用一个必定失败的 URL（如不存在的域名）验证 `fetched_chars` 为 `null` |
-| **排队积压与并发** | 模拟太快，压不出队列 | 用真实模型跑 20 人并发，见第 11 节 |
+| **排队积压与并发** | 模拟太快，压不出队列 | 用真实模型跑 20 人并发，见「容量实测」一节 |
 | **模型多轮工具调用** | mock 只做一轮（先抓一次，再给摘要） | 真实模型可能连抓多页，需观察 `handle_fetch` 的累加 |
 
 还有一个常见误判：`/api/v1/health` 返回 `engine: ready` **不代表模型可用**。
@@ -323,16 +323,23 @@ docker compose exec opencode-1 \
 要等第一个任务失败才暴露。所以 `docker compose ps` 里请确认 `agent-mock-model`
 也是 `healthy`。
 
-## 5.1 首次开户与自测
+## 6. 首次开户与自测
 
-库里没有任何账号时无法登录，先用管理接口开一个（`ADMIN_TOKEN` 必须与 `.env` 一致，
-且 `/internal/*` 只允许 `127.0.0.1` 来源，所以请 SSH 登录服务器后在本机执行）：
+库里没有任何账号时无法登录，先用管理接口开一个。`ADMIN_TOKEN` 必须与 `.env` 一致。
+
+**管理接口不从公网入口暴露**：`/internal/*` 在 nginx 里是 `deny all`，所以
+`https://域名/internal/...` 一定 403。请直接打到 `gateway` 容器（它只在 internal
+网络里，镜像内自带 `curl`）：
 
 ```bash
-curl -s -X POST https://agent.example.com/internal/users \
+docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users \
   -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"username":"zhangsan","password":"换成强密码","display_name":"张三","daily_quota":30}'
 ```
+
+> 为什么不用 nginx 白名单：端口是 docker 发布的，连接经过 docker-proxy，
+> `$remote_addr` 拿到的是网桥网关（实测恒为 `172.31.1.1`）而不是真实客户端，
+> 写 `allow 127.0.0.1` 既拦不住外面、也会误伤本机。
 
 账号由谁开户取决于身份模式：模式 A 需要运维开户；模式 B 由 App 调 `/auth/exchange` 自动开户。
 
@@ -351,7 +358,7 @@ curl -s -X POST https://agent.example.com/api/v1/tasks \
 curl -s -N "https://agent.example.com/api/v1/tasks/<task_id>/events?token=$TOKEN"
 ```
 
-## 5.1 两层模拟，别搞混
+## 7. 两层模拟，别搞混
 
 「模拟」在这个项目里有两个层次，作用完全不同：
 
@@ -364,7 +371,7 @@ curl -s -N "https://agent.example.com/api/v1/tasks/<task_id>/events?token=$TOKEN
 **webfetch 根本不会发生**，所以 url 任务的 `fetched_chars` 恒为 `null`。
 要验证抓取与 `source` 字段就必须用 `MOCK_MODE=false`。
 
-## 6. 扩容到 4 个实例
+## 8. 扩容到 4 个实例
 
 1. 复制一份 `opencode-3` 服务块，改名 `opencode-4`，换容器名、`OC4_PASSWORD`、卷名 `oc4-data`
 2. 在 `gateway.environment.OPENCODE_INSTANCES` 末尾追加 `,opencode-4:4096:${OC4_PASSWORD}`
@@ -372,7 +379,7 @@ curl -s -N "https://agent.example.com/api/v1/tasks/<task_id>/events?token=$TOKEN
 4. 在 `volumes:` 段加 `oc4-data:`，在 `.env` 加 `OC4_PASSWORD`
 5. `docker compose up -d`
 
-## 7. 证书续期
+## 9. 证书续期
 
 用云厂商免费证书时，到期前把新证书覆盖到 `certs/`，然后：
 
@@ -380,7 +387,7 @@ curl -s -N "https://agent.example.com/api/v1/tasks/<task_id>/events?token=$TOKEN
 docker compose exec nginx nginx -s reload
 ```
 
-## 8. 备份
+## 10. 备份
 
 真正需要备份的只有两处，都在 **Docker 命名卷**里（不是 `deploy/data/` 目录，
 那里只有 nginx 的日志与 certbot 的临时文件）：
@@ -404,7 +411,7 @@ ls -lh backup/
 恢复前先 `docker compose stop gateway`，把包解回同名卷后再 `up -d`，
 避免 SQLite 在写入过程中被复制出半截状态。
 
-## 9. 常用命令
+## 11. 常用命令
 
 ```bash
 docker compose ps                 # 状态与健康
@@ -414,14 +421,14 @@ docker compose down               # 停止（保留数据）
 docker compose up -d --build      # 重新构建并启动
 ```
 
-## 10. 国内网络注意
+## 12. 国内网络注意
 
 - 镜像构建已默认走 `registry.npmmirror.com`（opencode）与清华 PyPI 镜像（Python 包）
 - 如果拉基础镜像慢，给 Docker 配国内镜像加速器
 - `nginx:1.27-alpine` 与 `python:3.12-slim` 也建议走加速器
 - 需要抓境外网页时，在 `.env` 里填 `FETCH_HTTP_PROXY` / `FETCH_HTTPS_PROXY`，只有 opencode 实例会用到
 
-## 11. 容量实测（3 实例 / 4 vCPU 虚拟机）
+## 13. 容量实测（3 实例 / 4 vCPU 虚拟机）
 
 20 个用户同时提交、真实模型（非 MOCK）实测：
 
