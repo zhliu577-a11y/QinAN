@@ -253,12 +253,19 @@ class Dispatcher:
 
         async with get_sessionmaker()() as db:
             row = await db.get(Task, task.id)
-            if row is not None:
-                row.status = "running"
-                row.instance_id = instance.id
-                row.session_id = session_id
-                row.started_at = utcnow()
-                row.queue_pos = 0
+            # task 是排队时读进内存的快照，可能已经过期：用户在排队期间点了取消，
+            # 库里的状态已经是 canceled。这里必须重新确认，否则会把终态覆盖回
+            # running，任务照样跑完，表现为「取消返回成功、最终却是 succeeded」。
+            if row is None or row.status != "queued":
+                stale = row.status if row is not None else "missing"
+                logger.info("任务 %s 派发前状态已变为 %s，放弃派发", task.id, stale)
+                await self._abandon_start(task.id, instance, session_id, reuse_session)
+                return
+            row.status = "running"
+            row.instance_id = instance.id
+            row.session_id = session_id
+            row.started_at = utcnow()
+            row.queue_pos = 0
             existing = await db.get(UserBinding, task.user_id)
             if existing is None:
                 db.add(
@@ -293,11 +300,28 @@ class Dispatcher:
 
         await self.bus.emit(task.id, "status", {"status": "running"})
 
+    async def _abandon_start(
+        self, task_id: str, instance: InstanceRuntime, session_id: str, reuse_session: bool
+    ) -> None:
+        """派发途中发现任务已终结，撤销刚刚做的登记，把实例还回池子。"""
+        instance.sessions.pop(session_id, None)
+        self.pool.release(instance)
+        self._buffers.pop(task_id, None)
+        self._usage.pop(task_id, None)
+        self._fetch.pop(task_id, None)
+        if not reuse_session:
+            # 这个会话没人认领了，直接中止，免得在实例上留下孤儿会话
+            await instance.client.abort(session_id)  # type: ignore[attr-defined]
+
     async def _defer(self, task_id: str) -> None:
         """下发失败时把任务放回队列，最多重试一次。"""
         async with get_sessionmaker()() as db:
             task = await db.get(Task, task_id)
             if task is None:
+                return
+            # 任务可能在下发失败之前就被取消了，别把它拉回队列「复活」。
+            if task.status in TERMINAL_STATUSES:
+                logger.info("任务 %s 已是终态 %s，不再重试", task_id, task.status)
                 return
             if task.retried:
                 task.status = "failed"
