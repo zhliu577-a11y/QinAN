@@ -72,24 +72,6 @@ docker compose up -d --build
 参数传域名或 IP 都行（脚本按格式自动写进 SAN）。手机首次访问需手动信任该证书，
 自签证书仅用于演练，生产环境务必换成正式证书。
 
-要让同网段的手机连上演练环境，还得在宿主机放行转发端口（Windows 为例，
-管理员 PowerShell 执行一次即可）：
-
-```powershell
-New-NetFirewallRule -DisplayName 'QinAN VM gateway HTTP 8080' `
-    -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8080 -Profile Any
-New-NetFirewallRule -DisplayName 'QinAN VM gateway HTTPS 8443' `
-    -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8443 -Profile Any
-```
-
-然后手机浏览器访问 `https://<宿主机局域网IP>:8443/api/v1/health`，能返回
-`{"status":"ok",...}` 就说明链路通了。注意 80 端口只做 301 跳转，所以要访问
-443 对应的那个映射端口（示例里是 8443）。
-
-另外，宿主机上如果有别的进程占着 `127.0.0.1:8080`，本机用 `127.0.0.1` 测会打到
-那个进程而不是 VM（VirtualBox 的 NAT 监听绑在 `0.0.0.0`，更具体的 `127.0.0.1`
-绑定优先）。这种情况下用宿主机的局域网 IP 测即可，手机访问不受影响。
-
 ## 3. 构建顺序（重要）
 
 网关代码（M2/M3）已经落地，`docker compose up -d --build` 可以整体启动。
@@ -347,8 +329,18 @@ curl -s -X POST https://agent.example.com/api/v1/tasks \
 curl -s -N "https://agent.example.com/api/v1/tasks/<task_id>/events?token=$TOKEN"
 ```
 
-`MOCK_MODE=true` 时返回固定样例文本，可先确认接口、SSE 与配额都通；
-切到 `false` 并配好模型凭据后才走真实 agent。
+## 5.1 两层模拟，别搞混
+
+「模拟」在这个项目里有两个层次，作用完全不同：
+
+| 开关 | 走的路径 | 用途 |
+|---|---|---|
+| `MOCK_MODE=true` | 网关直接造假 agent，**不启动 opencode** | App 侧快速对接口、SSE、配额；不需要 opencode 与模型 |
+| `MOCK_MODE=false` + `MODEL_BASE_URL` 指向 `mock-model` | 网关 → opencode → mock-model | 验证整条链路（默认配置） |
+
+两者的差别不只是快慢：`MOCK_MODE=true` 时 opencode 与 mock-model 都在空转，
+**webfetch 根本不会发生**，所以 url 任务的 `fetched_chars` 恒为 `null`。
+要验证抓取与 `source` 字段就必须用 `MOCK_MODE=false`。
 
 ## 6. 扩容到 4 个实例
 
@@ -368,17 +360,27 @@ docker compose exec nginx nginx -s reload
 
 ## 8. 备份
 
-需要备份的只有两处（都在 `deploy/data/` 下）：
+真正需要备份的只有两处，都在 **Docker 命名卷**里（不是 `deploy/data/` 目录，
+那里只有 nginx 的日志与 certbot 的临时文件）：
 
-- `data/gateway/gateway.db` —— 账号、任务、会话映射
-- `data/workspace/` —— agent 的工作目录
+- 卷 `gateway-data` → 容器内 `/srv/agent/data/gateway.db` —— 账号、任务、会话映射
+- 卷 `workspace` → 容器内 `/srv/agent/workspace` —— agent 的工作目录与抓取产物
 
-实例私有数据在命名卷 `oc*-data` 里，丢了只影响 agent 的会话缓存，网关侧有摘要可重建，不必备份。
+实例私有数据在命名卷 `oc*-data` 里，丢了只影响 agent 的会话缓存，
+网关侧有摘要可重建，不必备份。卷名前缀是 compose 的 project name（`agent-gateway_`），
+可用 `docker volume ls` 确认实际名字。
 
 ```bash
-docker run --rm -v agent-gateway_oc1-data:/data -v "$PWD/backup:/backup" \
-  alpine tar czf /backup/oc1-$(date +%F).tgz -C /data .
+mkdir -p backup
+for vol in gateway-data workspace; do
+  docker run --rm -v "agent-gateway_${vol}:/data:ro" -v "$PWD/backup:/backup" \
+    alpine tar czf "/backup/${vol}-$(date +%F).tgz" -C /data .
+done
+ls -lh backup/
 ```
+
+恢复前先 `docker compose stop gateway`，把包解回同名卷后再 `up -d`，
+避免 SQLite 在写入过程中被复制出半截状态。
 
 ## 9. 常用命令
 
