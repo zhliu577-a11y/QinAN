@@ -18,7 +18,7 @@ RUN npm config set registry "${NPM_REGISTRY}" \
 # 这里把它改名为 app：保留 1000，命名卷首次挂载时才能继承正确的属主。
 RUN usermod --login app --home /home/app --move-home --shell /bin/bash node \
  && groupmod --new-name app node \
- && mkdir -p /srv/agent/workspace \
+ && mkdir -p /srv/agent/workspace /home/app/.local/share /home/app/.config \
  && chown -R app:app /srv/agent /home/app
 
 USER app
