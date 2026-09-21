@@ -14,7 +14,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..core.config import Settings
 from ..core.db import get_sessionmaker
@@ -251,35 +251,48 @@ class Dispatcher:
         self._usage[task.id] = {"tokens_in": 0, "tokens_out": 0, "cost": 0.0}
         self._fetch[task.id] = {"chars": 0, "title": None}
 
+        # 用条件更新「认领」任务，不要先读后写。先读后写会留下竞态窗口：
+        # 用户在排队期间取消、取消事务先提交，这里随后的无条件写会把 canceled
+        # 覆盖回 running，任务照样跑完，表现为「取消返回成功、最终却是 succeeded」。
+        # 条件更新的判定与写入是同一条语句，谁先提交谁生效，后来者 rowcount 为 0。
+        #
+        # 注意 task 是排队时读进内存的快照，这里不能再拿它的字段做判断。
+        abandoned = False
         async with get_sessionmaker()() as db:
-            row = await db.get(Task, task.id)
-            # task 是排队时读进内存的快照，可能已经过期：用户在排队期间点了取消，
-            # 库里的状态已经是 canceled。这里必须重新确认，否则会把终态覆盖回
-            # running，任务照样跑完，表现为「取消返回成功、最终却是 succeeded」。
-            if row is None or row.status != "queued":
-                stale = row.status if row is not None else "missing"
-                logger.info("任务 %s 派发前状态已变为 %s，放弃派发", task.id, stale)
-                await self._abandon_start(task.id, instance, session_id, reuse_session)
-                return
-            row.status = "running"
-            row.instance_id = instance.id
-            row.session_id = session_id
-            row.started_at = utcnow()
-            row.queue_pos = 0
-            existing = await db.get(UserBinding, task.user_id)
-            if existing is None:
-                db.add(
-                    UserBinding(
-                        user_id=task.user_id,
-                        instance_id=instance.id,
-                        session_id=session_id,
-                    )
+            claimed = await db.execute(
+                update(Task)
+                .where(Task.id == task.id, Task.status == "queued")
+                .values(
+                    status="running",
+                    instance_id=instance.id,
+                    session_id=session_id,
+                    started_at=utcnow(),
+                    queue_pos=0,
                 )
+            )
+            if claimed.rowcount != 1:
+                await db.rollback()
+                abandoned = True
             else:
-                existing.instance_id = instance.id
-                existing.session_id = session_id
-                existing.last_used_at = utcnow()
-            await db.commit()
+                existing = await db.get(UserBinding, task.user_id)
+                if existing is None:
+                    db.add(
+                        UserBinding(
+                            user_id=task.user_id,
+                            instance_id=instance.id,
+                            session_id=session_id,
+                        )
+                    )
+                else:
+                    existing.instance_id = instance.id
+                    existing.session_id = session_id
+                    existing.last_used_at = utcnow()
+                await db.commit()
+
+        if abandoned:
+            logger.info("任务 %s 派发前已被取消或认领，放弃派发", task.id)
+            await self._abandon_start(task.id, instance, session_id, reuse_session)
+            return
 
         try:
             await instance.client.prompt_async(  # type: ignore[attr-defined]
@@ -456,36 +469,56 @@ class Dispatcher:
         result_md: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """把任务推进到终态；如果它已经是终态则不动，返回 False。
+
+        判定与写入必须是同一条 UPDATE。先读后写的写法在「取消」与「完成」几乎同时
+        到达时会互相覆盖：取消先提交 canceled，随后完成的路径读到的是过期快照，
+        又把终态写回 succeeded。
+        """
         async with get_sessionmaker()() as db:
             task = await db.get(Task, task_id)
-            if task is None or task.status in TERMINAL_STATUSES:
-                return
+            if task is None:
+                return False
             instance_id = task.instance_id
             session_id = task.session_id
             user_id = task.user_id
 
-            task.status = status
-            task.finished_at = utcnow()
-            task.queue_pos = 0
+            values: dict[str, Any] = {
+                "status": status,
+                "finished_at": utcnow(),
+                "queue_pos": 0,
+                "error_code": error_code,
+                "error_message": error_message,
+            }
             if result_md is not None:
-                task.result_md = result_md
-            task.error_code = error_code
-            task.error_message = error_message
+                values["result_md"] = result_md
+
             usage = self._usage.pop(task_id, None)
             if usage:
-                task.tokens_in = usage["tokens_in"]
-                task.tokens_out = usage["tokens_out"]
-                task.cost = usage["cost"]
+                values["tokens_in"] = usage["tokens_in"]
+                values["tokens_out"] = usage["tokens_out"]
+                values["cost"] = usage["cost"]
+
             fetch = self._fetch.pop(task_id, None)
             if task.kind == "text" and task.fetched_chars is None:
-                task.fetched_chars = len(task.input_text or "")
+                values["fetched_chars"] = len(task.input_text or "")
             elif task.kind == "url" and fetch and fetch["chars"]:
-                task.fetched_chars = fetch["chars"]
+                values["fetched_chars"] = fetch["chars"]
                 title = fetch["title"]
                 # webfetch 的 title 就是 URL 本身时没有信息量，不写进 source
                 if title and title != (task.input_url or "").strip():
-                    task.source_title = title[:512]
+                    values["source_title"] = title[:512]
+
+            settled = await db.execute(
+                update(Task)
+                .where(Task.id == task_id, Task.status.not_in(TERMINAL_STATUSES))
+                .values(**values)
+            )
+            if settled.rowcount != 1:
+                await db.rollback()
+                logger.debug("任务 %s 已是终态，忽略本次 %s", task_id, status)
+                return False
 
             if status == "succeeded" and result_md:
                 binding = await db.get(UserBinding, user_id)
@@ -536,13 +569,25 @@ class Dispatcher:
                 return "missing"
             if task.status in TERMINAL_STATUSES:
                 return task.status
-            instance_id = task.instance_id
-            session_id = task.session_id
+
+        if not await self._finalize(task_id, "canceled"):
+            # 期间被完成/超时等路径抢先推进到终态了，如实回报实际状态，
+            # 不要谎报 canceled —— 那正是这个 bug 最初的症状。
+            async with get_sessionmaker()() as db:
+                task = await db.get(Task, task_id)
+                return task.status if task is not None else "missing"
+
+        # 任务可能在上面那次读之后才被派发出去（排队期间取消），那时
+        # instance_id / session_id 还是空的，中止请求没发出去。这里补一次，
+        # 把已经在实例上跑起来的会话真正停掉，否则模型会白跑完、白烧 token。
+        async with get_sessionmaker()() as db:
+            task = await db.get(Task, task_id)
+            instance_id = task.instance_id if task is not None else None
+            session_id = task.session_id if task is not None else None
 
         if instance_id and session_id:
             instance = self.pool.get(instance_id)
             if instance is not None:
+                instance.sessions.pop(session_id, None)
                 await instance.client.abort(session_id)  # type: ignore[attr-defined]
-
-        await self._finalize(task_id, "canceled")
         return "canceled"

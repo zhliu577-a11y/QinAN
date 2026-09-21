@@ -312,5 +312,7 @@ async def cancel_task(
         raise AppError(
             409, "TASK_NOT_CANCELABLE", f"任务已处于终态 {task.status}，无法取消"
         )
-    await runtime.dispatcher.cancel(task_id)
-    return CancelResponse(task_id=task_id, status="canceled")
+    # 回报实际落定的状态：极窄的窗口里任务可能刚好被跑完，
+    # 这时返回 canceled 就是谎报，App 会以为取消生效了。
+    status = await runtime.dispatcher.cancel(task_id)
+    return CancelResponse(task_id=task_id, status=status)
