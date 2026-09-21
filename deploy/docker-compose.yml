@@ -4,12 +4,13 @@ name: agent-gateway
 #
 # 注意：每个 opencode-N 服务都必须完整写出 environment 与 volumes。
 # YAML 的 <<: 合并是浅合并，子服务一旦定义 volumes / environment 就会整体覆盖锚点里的同名键。
+#
+# 注意：三个实例共用同一个镜像 tag，因此 build 只写在 opencode-1 上。
+# 若每个服务都写 build，compose 会并行构建并抢写同一个 tag，报
+# "image agent-opencode:local already exists"。
 
 x-opencode-base: &opencode-base
   image: agent-opencode:local
-  build:
-    context: ../opencode
-    dockerfile: Dockerfile
   restart: unless-stopped
   networks:
     - internal
@@ -72,6 +73,10 @@ services:
   opencode-1:
     <<: *opencode-base
     container_name: agent-opencode-1
+    # 三实例共用 agent-opencode:local，构建只在这里发生
+    build:
+      context: ../opencode
+      dockerfile: Dockerfile
     environment:
       <<: *opencode-model-env
       OPENCODE_SERVER_PASSWORD: ${OC1_PASSWORD}
