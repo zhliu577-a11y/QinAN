@@ -1,0 +1,16 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4"]
+ignore = [
+    # Optional[X] 与 X | None 都能用，不做无谓的批量改动
+    "UP045",
+    # FastAPI 的 Depends(...) 写在默认值位置是惯用写法
+    "B008",
+    # 行宽由人工控制，避免和注释排版冲突
+    "E501",
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["E402"]

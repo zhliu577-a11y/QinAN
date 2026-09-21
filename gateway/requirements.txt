@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.0
+SQLAlchemy==2.0.36
+# SQLAlchemy 的 asyncio 扩展依赖 greenlet，缺失会在启动时直接报错
+greenlet==3.1.1
+aiosqlite==0.20.0
+PyJWT==2.10.1
+bcrypt==4.2.1
+python-multipart==0.0.20
+tenacity==9.0.0

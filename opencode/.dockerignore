@@ -1,0 +1,13 @@
+# 配置目录是运行时以只读方式挂载的，不需要打进镜像
+config/
+
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 本地文件
+*.log
+.env
+.git/
+.vscode/
+.idea/

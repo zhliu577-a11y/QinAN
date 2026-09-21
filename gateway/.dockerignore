@@ -1,0 +1,19 @@
+# 宿主机的虚拟环境绝不能进镜像：venv 内记录的是 Windows 绝对路径，在 Linux 下全是废的
+.venv/
+venv/
+env/
+
+# Python 缓存与测试产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 本地配置与密钥（容器内由 env_file 注入）
+.env
+*.log
+
+# 编辑器
+.vscode/
+.idea/

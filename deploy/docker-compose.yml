@@ -1,0 +1,116 @@
+name: agent-gateway
+
+# 暴露面：只有 nginx 映射端口；gateway 与 opencode 仅在 internal 网络内，宿主机也连不上。
+#
+# 注意：每个 opencode-N 服务都必须完整写出 environment 与 volumes。
+# YAML 的 <<: 合并是浅合并，子服务一旦定义 volumes / environment 就会整体覆盖锚点里的同名键。
+
+x-opencode-base: &opencode-base
+  image: agent-opencode:local
+  build:
+    context: ../opencode
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  networks:
+    - internal
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: agent-nginx
+    restart: unless-stopped
+    networks:
+      - internal
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./data/certbot:/var/www/certbot
+      - ./data/nginx-logs:/var/log/nginx
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  gateway:
+    image: agent-gateway:local
+    build:
+      context: ../gateway
+      dockerfile: Dockerfile
+    container_name: agent-gateway
+    restart: unless-stopped
+    networks:
+      - internal
+    # 这里没有 ports —— 网关不对公网开放，只能被 nginx 通过内部网络访问
+    env_file:
+      - .env
+    environment:
+      # 实例名册：host:port:password，密码来自 .env，与各实例保持同一来源
+      OPENCODE_INSTANCES: >-
+        opencode-1:4096:${OC1_PASSWORD},opencode-2:4096:${OC2_PASSWORD},opencode-3:4096:${OC3_PASSWORD}
+      OPENCODE_SERVER_USERNAME: opencode
+    volumes:
+      # 用命名卷而不是 bind mount：容器以 uid 1000 运行，bind mount 的目录属主是 root，
+      # SQLite 会直接写不进去。命名卷首次挂载会继承镜像内的属主，省掉手工 chown。
+      - gateway-data:/srv/agent/data
+    depends_on:
+      opencode-1:
+        condition: service_healthy
+      opencode-2:
+        condition: service_healthy
+      opencode-3:
+        condition: service_healthy
+
+  opencode-1:
+    <<: *opencode-base
+    container_name: agent-opencode-1
+    environment:
+      OPENCODE_SERVER_PASSWORD: ${OC1_PASSWORD}
+      HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
+      HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-2,opencode-3
+    volumes:
+      - ../opencode/config:/home/app/.config/opencode:ro
+      - workspace:/srv/agent/workspace
+      - oc1-data:/home/app/.local/share
+
+  opencode-2:
+    <<: *opencode-base
+    container_name: agent-opencode-2
+    environment:
+      OPENCODE_SERVER_PASSWORD: ${OC2_PASSWORD}
+      HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
+      HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-1,opencode-3
+    volumes:
+      - ../opencode/config:/home/app/.config/opencode:ro
+      - workspace:/srv/agent/workspace
+      - oc2-data:/home/app/.local/share
+
+  opencode-3:
+    <<: *opencode-base
+    container_name: agent-opencode-3
+    environment:
+      OPENCODE_SERVER_PASSWORD: ${OC3_PASSWORD}
+      HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
+      HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,gateway,nginx,opencode-1,opencode-2
+    volumes:
+      - ../opencode/config:/home/app/.config/opencode:ro
+      - workspace:/srv/agent/workspace
+      - oc3-data:/home/app/.local/share
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  workspace:
+  gateway-data:
+  oc1-data:
+  oc2-data:
+  oc3-data:
+
+# 扩容：复制一个 opencode-N 服务块（改容器名、密码变量、卷名），
+# 并在 gateway 的 OPENCODE_INSTANCES 与 depends_on 里同步追加。
