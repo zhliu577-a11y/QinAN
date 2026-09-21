@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app.api.streams import task_websocket
+from app.services.opencode_client import MOCK_REASONING_TEXT
 
 from .conftest import login
 from .test_tasks import wait_terminal
@@ -88,6 +89,36 @@ async def test_sse_requires_token(client, new_user, auth_headers_factory):
     )
     response = await client.get(f"/api/v1/tasks/{task_id}/events")
     assert response.status_code == 401
+
+
+async def test_reasoning_deltas_never_reach_the_client(
+    client, new_user, auth_headers_factory
+):
+    """思维链的增量同样写在 field="text" 上，必须按 part 类型过滤掉。"""
+    token, headers, task_id = await _prepare_finished_task(
+        client, new_user, auth_headers_factory
+    )
+
+    detail = await client.get(f"/api/v1/tasks/{task_id}", headers=headers)
+    assert detail.status_code == 200
+    assert MOCK_REASONING_TEXT not in (detail.json()["result_md"] or "")
+
+    events: list[str] = []
+    payloads: list[str] = []
+    async with client.stream(
+        "GET", f"/api/v1/tasks/{task_id}/events", params={"token": token}
+    ) as response:
+        assert response.status_code == 200
+        async for line in response.aiter_lines():
+            if line.startswith("event: "):
+                events.append(line[len("event: ") :])
+            elif line.startswith("data: "):
+                payloads.append(line[len("data: ") :])
+            if events and events[-1] == "done":
+                break
+
+    assert "delta" in events
+    assert all(MOCK_REASONING_TEXT not in payload for payload in payloads)
 
 
 class StubWebSocket:

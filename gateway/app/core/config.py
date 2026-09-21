@@ -75,9 +75,13 @@ class Settings(BaseSettings):
     opencode_request_timeout_seconds: int = 30
 
     # ===== 模型 =====
+    # 这里只决定「用哪个 provider 的哪个 model」；真正的服务地址与密钥在 opencode 实例侧，
+    # 由 MODEL_BASE_URL / MODEL_API_KEY 注入（见 opencode/config/opencode.json）。
+    # provider id 与 model id 必须真实存在，写错不会在启动时报错，而是等到第一次调用才失败。
+    # 查询方式：https://models.dev/api.json，或进入容器执行 opencode models
+    # 默认指向 DeepSeek 协议下的 deepseek-v4-flash（经内网网关或官方直连均可）。
     model_provider: str = "deepseek"
-    model_name: str = "deepseek-chat"
-    model_api_key: str = ""
+    model_name: str = "deepseek-v4-flash"
     summarizer_agent: str = "summarizer"
 
     # ===== 存储 =====

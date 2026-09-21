@@ -161,6 +161,8 @@ class OpencodeClient:
 
 
 MOCK_CHUNK = 14
+# 真实 opencode 同样会把思维链作为 part 推流，mock 保留一段用于验证转发层确实把它过滤掉了
+MOCK_REASONING_TEXT = "（内部推理）先判断输入是链接还是文本，再压缩成要点。"
 
 
 class MockOpencodeClient:
@@ -211,26 +213,14 @@ class MockOpencodeClient:
 
             result = self._render_result(prompt, agent)
             self._results[session_id] = result
-            part_id = f"prt_{secrets.token_hex(6)}"
             message_id = f"msg_{secrets.token_hex(6)}"
+            reasoning_id = f"prt_{secrets.token_hex(6)}"
+            part_id = f"prt_{secrets.token_hex(6)}"
 
-            for index in range(0, len(result), MOCK_CHUNK):
-                chunk = result[index : index + MOCK_CHUNK]
-                await self._put(
-                    "message.part.updated",
-                    session_id,
-                    {
-                        "delta": chunk,
-                        "part": {
-                            "id": part_id,
-                            "sessionID": session_id,
-                            "messageID": message_id,
-                            "type": "text",
-                            "text": result[: index + MOCK_CHUNK],
-                        },
-                    },
-                )
-                await asyncio.sleep(self._step_delay / 2)
+            await self._stream_part(
+                session_id, message_id, reasoning_id, "reasoning", MOCK_REASONING_TEXT
+            )
+            await self._stream_part(session_id, message_id, part_id, "text", result)
 
             usage = {
                 "tokens_in": max(64, len(prompt) // 3),
@@ -260,6 +250,36 @@ class MockOpencodeClient:
             await self._put("session.idle", session_id, {})
         except asyncio.CancelledError:
             raise
+
+    async def _stream_part(
+        self, session_id: str, message_id: str, part_id: str, part_type: str, text: str
+    ) -> None:
+        """先宣告 part 类型，再用 message.part.delta 推增量，与 opencode 1.18 的实际事件一致。"""
+        await self._put(
+            "message.part.updated",
+            session_id,
+            {
+                "part": {
+                    "id": part_id,
+                    "sessionID": session_id,
+                    "messageID": message_id,
+                    "type": part_type,
+                    "text": "",
+                }
+            },
+        )
+        for index in range(0, len(text), MOCK_CHUNK):
+            await self._put(
+                "message.part.delta",
+                session_id,
+                {
+                    "messageID": message_id,
+                    "partID": part_id,
+                    "field": "text",
+                    "delta": text[index : index + MOCK_CHUNK],
+                },
+            )
+            await asyncio.sleep(self._step_delay / 2)
 
     async def _put(self, event_type: str, session_id: str, extra: dict[str, Any]) -> None:
         properties: dict[str, Any] = {"sessionID": session_id}

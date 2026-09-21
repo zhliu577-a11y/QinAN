@@ -1,6 +1,10 @@
 """每个实例只开一条上游 /event，按 sessionID 扇出到具体任务。
 
 不要为每个用户各开一条上游连接：20 人叠 3 个实例会产生几十条长连接。
+
+opencode 1.18 的增量走 `message.part.delta`（properties 里是 partID/field/delta），
+而不是挂在 `message.part.updated` 上。这里两种都处理，并额外做一层类型过滤：
+reasoning 的增量同样写在 field="text" 上，不过滤就会把模型思维链推给用户。
 """
 
 from __future__ import annotations
@@ -16,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 IGNORED_EVENTS = {"server.connected", "server.heartbeat", "server.instance.disposed"}
 RECONNECT_DELAY_SECONDS = 3.0
+TEXT_PART = "text"
+# 只用于记录 partID -> part.type 的映射；超过上限说明有会话没正常收到 session.idle
+MAX_TRACKED_PARTS = 4096
 
 
 class EventRelay:
@@ -23,6 +30,8 @@ class EventRelay:
         self.pool = pool
         self.dispatcher = dispatcher
         self._tasks: list[asyncio.Task[None]] = []
+        self._part_types: dict[str, str] = {}
+        self._parts_by_session: dict[str, set[str]] = {}
         self._closed = False
 
     async def start(self) -> None:
@@ -71,10 +80,33 @@ class EventRelay:
 
         if event_type == "message.part.updated":
             part = properties.get("part") or {}
+            session_id = part.get("sessionID") or properties.get("sessionID")
+            part_id = part.get("id")
+            part_type = str(part.get("type") or "")
+            if session_id and part_id:
+                self._remember_part(str(session_id), str(part_id), part_type)
+            # 兼容把增量直接挂在 updated 上的版本
             delta = properties.get("delta")
-            session_id = part.get("sessionID")
-            if delta and part.get("type") == "text" and session_id:
+            if delta and part_type == TEXT_PART and session_id:
                 await self.dispatcher.handle_delta(str(session_id), str(delta))
+            return
+
+        if event_type == "message.part.delta":
+            session_id = properties.get("sessionID")
+            part_id = properties.get("partID")
+            delta = properties.get("delta")
+            if not session_id or not delta or properties.get("field") != "text":
+                return
+            part_type = self._part_types.get(str(part_id))
+            if part_type != TEXT_PART:
+                logger.debug(
+                    "忽略非文本增量 instance=%s part=%s type=%s",
+                    instance.id,
+                    part_id,
+                    part_type,
+                )
+                return
+            await self.dispatcher.handle_delta(str(session_id), str(delta))
             return
 
         if event_type == "message.updated":
@@ -94,6 +126,7 @@ class EventRelay:
             session_id = properties.get("sessionID")
             if session_id:
                 await self.dispatcher.handle_completion(str(session_id))
+                self._forget_session(str(session_id))
             return
 
         if event_type == "session.error":
@@ -112,6 +145,20 @@ class EventRelay:
                 properties.get("sessionID"),
             )
             return
+
+    def _remember_part(self, session_id: str, part_id: str, part_type: str) -> None:
+        if not part_type:
+            return
+        if len(self._part_types) >= MAX_TRACKED_PARTS:
+            logger.warning("part 类型表超过 %d 条，整体清空", MAX_TRACKED_PARTS)
+            self._part_types.clear()
+            self._parts_by_session.clear()
+        self._part_types[part_id] = part_type
+        self._parts_by_session.setdefault(session_id, set()).add(part_id)
+
+    def _forget_session(self, session_id: str) -> None:
+        for part_id in self._parts_by_session.pop(session_id, ()):
+            self._part_types.pop(part_id, None)
 
 
 def _describe_error(error: Any) -> tuple[str, str]:

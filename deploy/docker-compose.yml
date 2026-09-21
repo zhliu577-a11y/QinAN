@@ -14,6 +14,13 @@ x-opencode-base: &opencode-base
   networks:
     - internal
 
+# 模型接入：opencode 启动时从这两个变量读服务地址与密钥。
+# 用 YAML 合并键 << 注入到各实例的 environment 内，避免三份重复。
+# MODEL_BASE_URL 留空时回退到 provider 官方地址。
+x-opencode-model-env: &opencode-model-env
+  MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+  MODEL_API_KEY: ${MODEL_API_KEY:-}
+
 services:
   nginx:
     image: nginx:1.27-alpine
@@ -66,6 +73,7 @@ services:
     <<: *opencode-base
     container_name: agent-opencode-1
     environment:
+      <<: *opencode-model-env
       OPENCODE_SERVER_PASSWORD: ${OC1_PASSWORD}
       HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
@@ -79,6 +87,7 @@ services:
     <<: *opencode-base
     container_name: agent-opencode-2
     environment:
+      <<: *opencode-model-env
       OPENCODE_SERVER_PASSWORD: ${OC2_PASSWORD}
       HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}
@@ -92,6 +101,7 @@ services:
     <<: *opencode-base
     container_name: agent-opencode-3
     environment:
+      <<: *opencode-model-env
       OPENCODE_SERVER_PASSWORD: ${OC3_PASSWORD}
       HTTP_PROXY: ${FETCH_HTTP_PROXY:-}
       HTTPS_PROXY: ${FETCH_HTTPS_PROXY:-}

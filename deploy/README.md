@@ -107,12 +107,77 @@ docker compose exec opencode-1 \
       - "127.0.0.1:4096:4096"
 ```
 
-## 5. 模型凭据
+## 5. 模型接入
 
-open code 需要 provider 凭据才能调用模型，两种方式：
+网关只负责告诉 opencode「用哪个 provider 的哪个 model」，服务地址与密钥在实例启动时注入，
+因此换服务商不必改代码。`.env` 里相关的四个变量：
 
-- 实例启动时由网关调 `PUT /auth/:id` 写入（推荐，凭据集中在网关，方便轮换）
-- 或在 `opencode-N` 的 `environment` 里设置对应厂商的环境变量（名称以 provider 文档为准）
+```
+MODEL_PROVIDER=deepseek                      # provider id（models.dev 清单里的）
+MODEL_NAME=deepseek-v4-flash                 # model id
+MODEL_BASE_URL=http://172.16.3.6:8589/v1      # 服务地址；留空则回退 provider 官方地址
+MODEL_API_KEY=sk-xxxxxxxx                    # 该地址签发的密钥
+```
+
+service 侧的落地方式是 `opencode/config/opencode.json` 覆写 `deepseek` 这个 provider
+的 `options`（`{env:...}` 是 opencode 官方支持的变量替换，密钥不进仓库）：
+
+```json
+"provider": {
+  "deepseek": {
+    "options": {
+      "baseURL": "{env:MODEL_BASE_URL}",
+      "apiKey": "{env:MODEL_API_KEY}"
+    }
+  }
+}
+```
+
+### 对模型服务的要求
+
+只要求 **OpenAI 兼容**，两个端点够用：
+
+- `GET  {MODEL_BASE_URL}/models` —— 列模型
+- `POST {MODEL_BASE_URL}/chat/completions` —— 对话
+
+所以内网自建网关、`api.deepseek.com`、任何一家 OpenAI 兼容代理都能直接换成 `MODEL_BASE_URL`。
+
+**`MODEL_NAME` 必须是该地址真实提供的 id**。写错不会在启动时报错，而是第一次调用才失败。
+注意 `opencode models` 列的是 models.dev 的静态清单，**不代表你的网关真能调**；以
+`/models` 的实际返回为准：
+
+```bash
+curl -s -H "Authorization: Bearer $MODEL_API_KEY" "$MODEL_BASE_URL/models"
+```
+
+### 换模型 / 换服务商
+
+以下改动都只需要重建 opencode 实例，网关不用动：
+
+| 场景 | 要改的地方 |
+|---|---|
+| 只换模型（同一地址） | `.env` 的 `MODEL_NAME` |
+| 换地址 / 换密钥 | `.env` 的 `MODEL_BASE_URL`、`MODEL_API_KEY` |
+| 换 provider id（如改走 `openai`、`zhipuai`） | `.env` 的 `MODEL_PROVIDER` **加** `opencode.json` 里覆写的那个 key，两处必须同名 |
+
+最后一行是最容易踩的坑：`opencode.json` 覆写的是名叫 `deepseek` 的 provider，
+若 `MODEL_PROVIDER` 改成别的 id，配置就必须同步改键名，否则覆写不生效、请求会打到官方地址。
+
+环境变量只在容器创建时注入，`restart` 不生效，改完要重建：
+
+```bash
+docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3
+```
+
+### 连通性自测
+
+```bash
+# 实例内直接跑一次，能打印 PONG 说明地址 + 密钥 + 模型 id 三者都对
+docker compose exec opencode-1 \
+  opencode run --model deepseek/deepseek-v4-flash 'Reply with exactly: PONG'
+```
+
+密钥统一走环境变量，不要用容器内 `opencode auth login`：配置里已显式指定 `apiKey`，会盖掉登录凭据。
 
 ## 5.1 首次开户与自测
 
