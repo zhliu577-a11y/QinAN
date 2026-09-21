@@ -21,8 +21,12 @@ logger = logging.getLogger(__name__)
 IGNORED_EVENTS = {"server.connected", "server.heartbeat", "server.instance.disposed"}
 RECONNECT_DELAY_SECONDS = 3.0
 TEXT_PART = "text"
+TOOL_PART = "tool"
+WEBFETCH_TOOL = "webfetch"
 # 只用于记录 partID -> part.type 的映射；超过上限说明有会话没正常收到 session.idle
 MAX_TRACKED_PARTS = 4096
+# 已计入的 webfetch 调用 ID，避免同一部件在 pending/running/completed 之间反复上报
+MAX_TRACKED_CALLS = 4096
 
 
 class EventRelay:
@@ -32,6 +36,7 @@ class EventRelay:
         self._tasks: list[asyncio.Task[None]] = []
         self._part_types: dict[str, str] = {}
         self._parts_by_session: dict[str, set[str]] = {}
+        self._seen_fetch_calls: set[str] = set()
         self._closed = False
 
     async def start(self) -> None:
@@ -85,6 +90,8 @@ class EventRelay:
             part_type = str(part.get("type") or "")
             if session_id and part_id:
                 self._remember_part(str(session_id), str(part_id), part_type)
+            if part_type == TOOL_PART and session_id:
+                await self._handle_tool(str(session_id), part)
             # 兼容把增量直接挂在 updated 上的版本
             delta = properties.get("delta")
             if delta and part_type == TEXT_PART and session_id:
@@ -146,6 +153,38 @@ class EventRelay:
             )
             return
 
+    async def _handle_tool(self, session_id: str, part: dict[str, Any]) -> None:
+        """把 webfetch 实际抓到的正文长度记到任务上。
+
+        同一个工具部件会随 pending → running → completed 多次推送，
+        且每次都是全量 part，所以只在 completed 时计一次，并按 callID 去重。
+        """
+        if part.get("tool") != WEBFETCH_TOOL:
+            return
+        state = part.get("state") or {}
+        if state.get("status") != "completed":
+            return
+        call_id = str(part.get("callID") or part.get("id") or "")
+        if not call_id or call_id in self._seen_fetch_calls:
+            return
+        if len(self._seen_fetch_calls) >= MAX_TRACKED_CALLS:
+            logger.warning("webfetch 调用表超过 %d 条，整体清空", MAX_TRACKED_CALLS)
+            self._seen_fetch_calls.clear()
+        self._seen_fetch_calls.add(call_id)
+
+        output = state.get("output")
+        chars = len(output) if isinstance(output, str) else 0
+        metadata = state.get("metadata") or {}
+        await self.dispatcher.handle_fetch(
+            session_id, chars, _clean_fetch_title(state.get("title"))
+        )
+        logger.debug(
+            "webfetch 完成 session=%s chars=%d truncated=%s",
+            session_id,
+            chars,
+            metadata.get("truncated"),
+        )
+
     def _remember_part(self, session_id: str, part_id: str, part_type: str) -> None:
         if not part_type:
             return
@@ -159,6 +198,24 @@ class EventRelay:
     def _forget_session(self, session_id: str) -> None:
         for part_id in self._parts_by_session.pop(session_id, ()):
             self._part_types.pop(part_id, None)
+
+
+def _clean_fetch_title(title: Any) -> str | None:
+    """webfetch 的 title 形如 "<url> (text/html;charset=UTF-8)"。
+
+    括号里那截是 content-type，不是网页标题，去掉；只剩 URL 时返回 None，
+    免得把 URL 重复塞进 source.title。抓取失败时 title 多为 "Fetch failed"，
+    这类值直接忽略。
+    """
+    if not isinstance(title, str):
+        return None
+    value = title.strip()
+    head, sep, tail = value.rpartition(" (")
+    if sep and tail.endswith(")") and "/" in tail:
+        value = head.strip()
+    if not value or value.lower().startswith("fetch failed"):
+        return None
+    return value
 
 
 def _describe_error(error: Any) -> tuple[str, str]:

@@ -42,6 +42,7 @@ class Dispatcher:
         self._buffers: dict[str, list[str]] = {}
         self._pending: dict[str, str] = {}
         self._usage: dict[str, dict[str, Any]] = {}
+        self._fetch: dict[str, dict[str, Any]] = {}
         self._streaming: set[str] = set()
         self._wake = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
@@ -248,6 +249,7 @@ class Dispatcher:
         self.pool.mark_busy(instance, task.id)
         self._buffers[task.id] = []
         self._usage[task.id] = {"tokens_in": 0, "tokens_out": 0, "cost": 0.0}
+        self._fetch[task.id] = {"chars": 0, "title": None}
 
         async with get_sessionmaker()() as db:
             row = await db.get(Task, task.id)
@@ -357,6 +359,20 @@ class Dispatcher:
         usage["tokens_out"] = int(tokens.get("output") or usage["tokens_out"])
         usage["cost"] = float(info.get("cost") or usage["cost"])
 
+    async def handle_fetch(self, session_id: str, chars: int, title: str | None) -> None:
+        """记录 webfetch 实际抓到的正文长度与标题。
+
+        一个任务可能抓多次（模型自己决定），所以按次累加而不是覆盖。
+        """
+        found = self.pool.task_of_session(session_id)
+        if found is None:
+            return
+        _, task_id = found
+        record = self._fetch.setdefault(task_id, {"chars": 0, "title": None})
+        record["chars"] = int(record["chars"]) + max(chars, 0)
+        if title and not record["title"]:
+            record["title"] = title
+
     async def handle_completion(self, session_id: str) -> None:
         found = self.pool.task_of_session(session_id)
         if found is None:
@@ -437,8 +453,15 @@ class Dispatcher:
                 task.tokens_in = usage["tokens_in"]
                 task.tokens_out = usage["tokens_out"]
                 task.cost = usage["cost"]
+            fetch = self._fetch.pop(task_id, None)
             if task.kind == "text" and task.fetched_chars is None:
                 task.fetched_chars = len(task.input_text or "")
+            elif task.kind == "url" and fetch and fetch["chars"]:
+                task.fetched_chars = fetch["chars"]
+                title = fetch["title"]
+                # webfetch 的 title 就是 URL 本身时没有信息量，不写进 source
+                if title and title != (task.input_url or "").strip():
+                    task.source_title = title[:512]
 
             if status == "succeeded" and result_md:
                 binding = await db.get(UserBinding, user_id)
