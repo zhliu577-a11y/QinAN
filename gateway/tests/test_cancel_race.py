@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import secrets
 
-from sqlalchemy import select
-
 from app.models import Task, User
+from sqlalchemy import select
 
 
 async def _user_id(session_factory, username: str) -> int:

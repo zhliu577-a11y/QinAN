@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from app.services.dispatcher import Dispatcher
 from app.services.event_relay import EventRelay, _clean_fetch_title
 
