@@ -251,7 +251,7 @@ service 侧的落地方式是 `opencode/config/opencode.json` 覆写 `deepseek` 
 - `GET  {MODEL_BASE_URL}/models` —— 列模型
 - `POST {MODEL_BASE_URL}/chat/completions` —— 对话
 
-所以内网自建网关、`api.deepseek.com`、任何一家 OpenAI 兼容代理都能直接换成 `MODEL_BASE_URL`。
+所以自建网关、`api.deepseek.com`、任何一家 OpenAI 兼容代理都能直接换成 `MODEL_BASE_URL`。
 
 **`MODEL_NAME` 必须是该地址真实提供的 id**。写错不会在启动时报错，而是第一次调用才失败。
 注意 `opencode models` 列的是 models.dev 的静态清单，**不代表你的网关真能调**；以
@@ -263,21 +263,16 @@ curl -s -H "Authorization: Bearer $MODEL_API_KEY" "$MODEL_BASE_URL/models"
 
 ### 没有模型服务时怎么验证（模拟模型）
 
-真实部署在国内服务器上，那里连不到办公内网的模型网关。要在**完全不依赖任何外部模型**
-的前提下把整条链路跑通、并且能反复回归，用自带的模拟模型：
-
-```bash
-docker compose --profile mock up -d          # 拉起 mock-model（默认不启动）
-```
-
-然后把 `.env` 指过去：
+要在**完全不依赖任何外部模型**的前提下把整条链路跑通、并且能反复回归，
+用自带的模拟模型（`.env.example` 默认就指向它，`docker compose up -d` 会一起拉起）：
 
 ```
 MODEL_BASE_URL=http://mock-model:8000/v1
 MODEL_API_KEY=mock-key-not-used
 ```
 
-重建实例让变量生效：`docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3`。
+如果是从真实模型切回来，重建实例让变量生效：
+`docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3`。
 
 `deploy/mock-model/` 是 OpenAI 兼容的假模型，**只用 python 标准库**（构建不装依赖，
 断网也能构建）。它的行为是确定性的，所以可以做自动化断言：
@@ -288,7 +283,12 @@ MODEL_API_KEY=mock-key-not-used
 - 其余 → 直接按输入文本回一段结构化摘要
 
 输出以 `【模拟模型】` 开头，一眼能看出不是真实模型。它不做鉴权、内容是编造的，
-**绝不能用于生产**；因此用 compose profile 隔离，默认 `docker compose up -d` 不会启动它。
+**绝不能用于生产**。它不映射端口、只挂在内部网络上，所以默认随 `up -d` 一起启动
+也不会扩大暴露面；接上真实模型后想省资源可以 `docker compose stop mock-model`。
+
+> 为什么不把它藏进 compose profile：`.env.example` 的 `MODEL_BASE_URL` 默认指向它，
+> 而首次启动的命令是 `docker compose up -d --build`（不带任何 profile）。两者一错位，
+> opencode 就连不上模型，每个任务都会失败，而且要到第一次提交任务才暴露。
 
 ### 换模型 / 换服务商
 

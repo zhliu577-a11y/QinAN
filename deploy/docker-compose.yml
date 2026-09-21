@@ -28,12 +28,13 @@ x-opencode-model-env: &opencode-model-env
   MODEL_API_KEY: ${MODEL_API_KEY:-}
 
 services:
-  # 模拟模型服务：只在需要「不依赖任何外部模型」跑通链路时启动。
-  # 用 profile 隔离，默认 `docker compose up -d` 不会拉起它，生产环境不会误启。
-  #   docker compose --profile mock up -d
-  # 启动后把 .env 里 MODEL_BASE_URL 指到 http://mock-model:8000/v1 即可。
+  # 模拟模型服务：OpenAI 兼容的假模型，让整条链路不依赖任何外部模型。
+  # 默认随 `docker compose up -d` 一起启动。曾经用 profile 隔离，结果 .env.example
+  # 默认把 MODEL_BASE_URL 指向它、而 README 的主启动命令不带 --profile，
+  # 于是照文档走的人第一步就连不上模型，所有任务失败 —— 所以这里不再隔离。
+  # 它不映射端口，只在内部网络里供 opencode 访问；生产环境跑着也无害，
+  # 接上真实模型后想省资源可以 `docker compose stop mock-model`。
   mock-model:
-    profiles: ["mock"]
     image: agent-mock-model:local
     build:
       context: ./mock-model
