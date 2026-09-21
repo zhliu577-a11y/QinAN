@@ -18,6 +18,7 @@ from .api import admin, auth, streams, tasks
 from .core.config import Settings, get_settings
 from .core.db import ping_db
 from .core.errors import AppError, app_error_handler, validation_error_handler
+from .core.logbuffer import install_log_buffer
 from .models import Task
 from .runtime import get_runtime
 from .schemas import HealthResponse
@@ -26,10 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 def _configure_logging(settings: Settings) -> None:
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
     logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # stdout 交给 docker 收集（权威副本），环形缓冲是给 /internal/logs 的自检窗口。
+    # 这里用 level 而不是 INFO：LOG_LEVEL 调成 DEBUG 时，自检也应该看得到 DEBUG。
+    install_log_buffer(level)
 
 
 @asynccontextmanager

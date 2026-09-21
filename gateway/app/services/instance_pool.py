@@ -119,6 +119,38 @@ class InstancePool:
             "healthy": len(healthy),
         }
 
+    def snapshot(self) -> list[dict[str, object]]:
+        """逐实例明细，供 /internal/instances 排查「哪个进程卡住了」。
+
+        stats() 只给聚合数，看不出是哪个实例在忙、忙了多久、失败几次。
+        """
+        now = utcnow()
+        rows: list[dict[str, object]] = []
+        for instance in self._instances:
+            busy_since = instance.busy_since
+            idle_since = instance.idle_since
+            rows.append(
+                {
+                    "id": instance.id,
+                    "status": instance.status,
+                    "base_url": getattr(instance.client, "base_url", ""),
+                    "current_task_id": instance.current_task_id,
+                    "failures": instance.failures,
+                    "busy_seconds": (
+                        int((now - busy_since).total_seconds())
+                        if instance.status == BUSY and busy_since is not None
+                        else 0
+                    ),
+                    "idle_seconds": (
+                        int((now - idle_since).total_seconds())
+                        if instance.status == IDLE and idle_since is not None
+                        else 0
+                    ),
+                    "sessions": len(instance.sessions),
+                }
+            )
+        return rows
+
     def mark_busy(self, instance: InstanceRuntime, task_id: str) -> None:
         instance.status = BUSY
         instance.current_task_id = task_id

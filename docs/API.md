@@ -298,6 +298,14 @@ Content-Type: application/json
 | 502 | `UPSTREAM_ERROR` | 智能体后端异常，可重试 |
 | 504 | `TIMEOUT` | 执行超时 |
 
+任务级的错误码（出现在 `GET /tasks/{id}` 的 `error.code` 里，不是 HTTP 状态码）：
+
+| code | 含义 |
+|---|---|
+| `UPSTREAM_ERROR` | 智能体实例异常，自动重试后仍失败 |
+| `TIMEOUT` | 超过 `TASK_TIMEOUT_SECONDS` |
+| `GATEWAY_RESTARTED` | 网关重启打断了任务，自动重试后仍未完成，需要重新提交。这是运维动作导致的，不是用户输入的问题 |
+
 429 有两种来源，App 要分开处理：
 
 - **网关返回的 429**（`QUOTA_EXCEEDED` / `QUEUE_FULL` / `RATE_LIMITED`）：标准 JSON 错误体，

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -30,6 +31,8 @@ class Runtime:
         self.dispatcher = Dispatcher(self.pool, self.bus, settings)
         self.relay = EventRelay(self.pool, self.dispatcher)
         self.started = False
+        self.started_at: float = time.time()
+        self.ready = False
 
     async def start(self) -> None:
         await init_db()
@@ -37,15 +40,24 @@ class Runtime:
         await self.dispatcher.start()
         await self.relay.start()
         self.started = True
+        self.ready = True
+        self.started_at = time.time()
         mode = "MOCK" if self.settings.mock_mode else "REAL"
         logger.info("网关运行时已启动（%s 模式）", mode)
 
     async def stop(self) -> None:
         self.started = False
+        self.ready = False
         await self.relay.stop()
         await self.dispatcher.stop()
         await self.pool.stop()
         await dispose_db()
+
+    def uptime_seconds(self) -> int:
+        """已启动多久。started 为 False 时返回 0，避免把「没起来」报成很大一个数。"""
+        if not self.started:
+            return 0
+        return max(0, int(time.time() - self.started_at))
 
     def engine_state(self) -> str:
         stats = self.pool.stats()

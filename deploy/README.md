@@ -337,9 +337,12 @@ docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users
   -d '{"username":"zhangsan","password":"换成强密码","display_name":"张三","daily_quota":30}'
 ```
 
-> 为什么不用 nginx 白名单：端口是 docker 发布的，连接经过 docker-proxy，
-> `$remote_addr` 拿到的是网桥网关（实测恒为 `172.31.1.1`）而不是真实客户端，
-> 写 `allow 127.0.0.1` 既拦不住外面、也会误伤本机。
+> 为什么用 `deny all` 而不是 nginx 白名单：`deny all` 是无条件的，不依赖来源 IP，
+> 所以在任何网络模式下都成立。而白名单要为「最终是哪个地址进来」负责，那件事
+> 该由防火墙/安全组定义；在 nginx 里再写一份，线上换入口（加 LB、改 host 网络）
+> 时容易和实际脱节，看起来拦住了其实没有。
+
+日常运维（看状态、翻日志、重启）都不用记这些细节，直接用 `deploy/ops.sh`，见第 14 节。
 
 账号由谁开户取决于身份模式：模式 A 需要运维开户；模式 B 由 App 调 `/auth/exchange` 自动开户。
 
@@ -413,13 +416,22 @@ ls -lh backup/
 
 ## 11. 常用命令
 
+日常运维优先用 `./ops.sh`（见第 14 节），它把下面这些容易记错的细节都固化好了。
+直接敲 docker 命令时的注意事项：
+
 ```bash
-docker compose ps                 # 状态与健康
-docker compose logs -f nginx      # 网关日志
-docker compose restart gateway    # 改完 .env 后重启网关
-docker compose down               # 停止（保留数据）
-docker compose up -d --build      # 重新构建并启动
+docker compose ps                             # 状态与健康
+docker compose logs -f gateway                # 网关日志（stdout 是权威副本）
+docker compose up -d --force-recreate gateway # 改完 .env 后重建网关
+docker compose down                           # 停止（保留数据）
+docker compose up -d --build                  # 重新构建并启动
 ```
+
+两个坑：
+
+- 改 `nginx.conf` 后**不能用 `restart`**：它是单文件 bind mount，`restart` 只会重载
+  容器创建时那个 inode，看不到新内容。必须 `--force-recreate nginx`。
+- 改 `.env` 后也要 `--force-recreate`，`restart` 不会重新读取。
 
 ## 12. 国内网络注意
 
@@ -497,3 +509,64 @@ docker compose up -d --build      # 重新构建并启动
   建连开销。这是设计取舍，不是服务端能兜住的。
 
 SSE 有自己的 `rl_sse`（60r/m burst 20）桶，不会被查询流量挤占。
+
+## 14. 运维：状态 / 日志 / 重启
+
+统一入口是 `./ops.sh`（在 `deploy/` 下，跑在宿主机上）：
+
+```bash
+./ops.sh status                  # 容器 + 对外健康 + 网关自检，先看这个
+./ops.sh health                  # 只输出 ok/degraded，退出码即状态，给监控用
+./ops.sh instances               # 后端 opencode 进程明细
+./ops.sh logs gateway -n 100     # 容器 stdout 日志
+./ops.sh logs-api --level error  # 网关进程自己的近期日志
+./ops.sh user zhangsan           # 单个用户详情
+./ops.sh restart gateway         # 重建（不是 restart，原因见下）
+./ops.sh heal                    # 只重建不健康的容器
+./ops.sh backup                  # 备份数据卷
+./ops.sh help                    # 全部命令
+```
+
+### 设计：为什么重启和别人的日志不在接口里
+
+`/internal/` 只覆盖网关**自己**的进程内状态。容器层的东西（重启、nginx /
+opencode 的 stdout）刻意留给宿主机上的 `ops.sh`，因为要让容器做这些事就得给它挂
+docker socket —— 挂上 socket 等价于把宿主机 root 交出去（可以起特权容器挂 `/`），
+为了几个运维按钮不值得。这个边界是刻意的，不要为了「统一入口」去破它。
+
+### 状态类内部接口
+
+都在 `gateway` 容器内可达，需要 `X-Admin-Token`，从公网一律 403：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /internal/status` | 一屏自检：`checks` 里每项带 `ok` 与 `detail`，`status` 是总判定；另含 `uptime_seconds`、池子、队列、关键配置 |
+| `GET /internal/instances` | 逐个 opencode 进程：`status` / `current_task_id` / `busy_seconds` / `failures` / `sessions` |
+| `GET /internal/logs` | 网关进程近期日志（环形缓冲，默认 2000 条，重启清空） |
+| `GET /internal/metrics` | 池与队列的聚合数字 |
+| `GET /internal/users` | 用户列表 |
+| `GET /internal/users/{id}` | 单用户详情：配额用量、任务分布、近 10 条任务、登录设备、实例绑定 |
+
+`/internal/logs` 支持 `limit`、`level`、`logger_name`、`task_id`、`after_seq`。
+`after_seq` 用来增量拉取：把上次拿到的最大 `seq` 传进去，只取新增部分。
+
+排查顺序建议：`status` 看总判定 → `instances` 看是不是某个进程卡住 →
+`logs-api --level error` 看网关报了什么 → `logs <服务>` 看容器 stdout。
+
+> `/internal/logs` 只覆盖网关，且只在内存里。日志的权威副本仍然是容器 stdout，
+> 由 docker 收集（`./ops.sh logs`）。别把环形缓冲当成日志归档。
+
+### 重启语义（重要）
+
+网关是**单 worker、状态全在进程内**（实例池、调度器、事件转发），所以重建它会打断
+正在执行的任务。为此启动时会做一次回收：
+
+- 库里停在 `running` / `streaming` 的任务，如果还没重试过 → 放回队列重试一次；
+- 已经重试过的 → 判 `failed`，错误码 `GATEWAY_RESTARTED`。
+
+所以重启不会让任务永久卡在「进行中」，客户端一定能等到终态。代价是那一次重试会
+在新实例上重建上游会话，前一次的部分输出作废 —— 摘要任务很短，这个取舍可以接受。
+
+重建命令一律走 `up -d --force-recreate` 而不是 `restart`：`nginx.conf` 是单文件
+bind mount，`restart` 只会重载容器创建时那个 inode；`.env` 的改动同样只有重建才生效。
+`ops.sh restart` 已经按这个来了。

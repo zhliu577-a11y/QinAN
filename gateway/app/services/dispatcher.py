@@ -51,6 +51,7 @@ class Dispatcher:
     # ---------- 生命周期 ----------
 
     async def start(self) -> None:
+        await self._recover_orphans()
         self._loop_task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -66,6 +67,47 @@ class Dispatcher:
 
     def wake(self) -> None:
         self._wake.set()
+
+    async def _recover_orphans(self) -> None:
+        """回收上一个进程遗留的「进行中」任务。
+
+        池、调度器、事件转发全是进程内状态（见 runtime.py 顶部），所以进程一旦
+        重启，数据库里停在 running / streaming 的任务就再也没人推进了 ——
+        客户端会一直等一个永远不会到来的终态。这里在启动时把它们收干净。
+
+        处理方式与实例异常一致（复用 retried 标记）：先放回队列重试一次，
+        再失败就判死。重试会重新建一个上游会话，前一次的部分输出作废 ——
+        这是可接受的，因为摘要任务很短，且客户端要的是结果而不是省钱。
+        """
+        async with get_sessionmaker()() as db:
+            result = await db.execute(
+                select(Task).where(Task.status.in_(ACTIVE_STATUSES))
+            )
+            orphans = list(result.scalars().all())
+            if not orphans:
+                return
+
+            recovered: list[tuple[str, str]] = []
+            for task in orphans:
+                if task.retried:
+                    task.status = "failed"
+                    task.error_code = "GATEWAY_RESTARTED"
+                    task.error_message = "网关重启导致任务中断，自动重试后仍未完成"
+                    task.finished_at = utcnow()
+                    recovered.append((task.id, "failed"))
+                    continue
+                task.retried = True
+                task.status = "queued"
+                task.instance_id = None
+                task.session_id = None
+                task.started_at = None
+                recovered.append((task.id, "queued"))
+            await db.commit()
+
+        logger.warning("启动时发现 %d 个中断的任务，已回收", len(recovered))
+        for task_id, status in recovered:
+            await self.bus.emit(task_id, "status", {"status": status})
+        self.wake()
 
     async def _run(self) -> None:
         interval = self.settings.dispatcher_interval_seconds
