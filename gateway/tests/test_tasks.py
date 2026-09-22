@@ -278,3 +278,93 @@ async def test_login_required_for_tasks(client):
         "/api/v1/tasks", json={"kind": "text", "text": "未鉴权"}
     )
     assert response.status_code == 401
+
+async def test_list_hides_tasks_past_retention(client, new_user, auth_headers_factory):
+    """列表要和详情同一口径：详情已 404 的任务不该还列在列表里。"""
+    from datetime import timedelta
+
+    from app.core.db import get_sessionmaker
+    from app.core.timeutil import utcnow
+    from app.models import Task
+
+    token = await login(client, *(await new_user()))
+    headers = auth_headers_factory(token)
+    me = (await client.get("/api/v1/me", headers=headers)).json()
+
+    fresh = await client.post(
+        "/api/v1/tasks", json={"kind": "text", "text": "新的"}, headers=headers
+    )
+    fresh_id = fresh.json()["task_id"]
+    await wait_terminal(client, headers, fresh_id)
+
+    # 造一条 40 天前就结束的任务（留存期 30 天）
+    old_id = "tsk_expired_list"
+    async with get_sessionmaker()() as db:
+        db.add(
+            Task(
+                id=old_id,
+                user_id=me["id"],
+                kind="text",
+                input_text="旧的",
+                status="succeeded",
+                finished_at=utcnow() - timedelta(days=40),
+                created_at=utcnow() - timedelta(days=41),
+            )
+        )
+        await db.commit()
+
+    try:
+        listed = (await client.get("/api/v1/tasks", headers=headers)).json()["items"]
+        ids = [item["task_id"] for item in listed]
+        assert fresh_id in ids
+        assert old_id not in ids, "过期任务不应出现在列表里"
+
+        # 详情同样不可见，两个接口口径一致
+        assert (
+            await client.get(f"/api/v1/tasks/{old_id}", headers=headers)
+        ).status_code == 404
+    finally:
+        async with get_sessionmaker()() as db:
+            row = await db.get(Task, old_id)
+            if row is not None:
+                await db.delete(row)
+                await db.commit()
+
+
+async def test_list_still_shows_non_terminal_tasks_past_created_retention(
+    client, new_user, auth_headers_factory
+):
+    """留存期只该挡「已结束」的任务；还在排队/运行的不能被藏掉。"""
+    from datetime import timedelta
+
+    from app.core.db import get_sessionmaker
+    from app.core.timeutil import utcnow
+    from app.models import Task
+
+    token = await login(client, *(await new_user()))
+    headers = auth_headers_factory(token)
+    me = (await client.get("/api/v1/me", headers=headers)).json()
+
+    stuck_id = "tsk_old_queued"
+    async with get_sessionmaker()() as db:
+        db.add(
+            Task(
+                id=stuck_id,
+                user_id=me["id"],
+                kind="text",
+                input_text="排队很久",
+                status="queued",
+                created_at=utcnow() - timedelta(days=90),
+            )
+        )
+        await db.commit()
+
+    try:
+        listed = (await client.get("/api/v1/tasks", headers=headers)).json()["items"]
+        assert stuck_id in [item["task_id"] for item in listed]
+    finally:
+        async with get_sessionmaker()() as db:
+            row = await db.get(Task, stuck_id)
+            if row is not None:
+                await db.delete(row)
+                await db.commit()

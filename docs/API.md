@@ -55,6 +55,32 @@ App 后端用双方约定的共享密钥签名，无需用户二次登录。
 - 首次调用会自动开户（`daily_quota` 取默认值），用户信息随后可人工调整
 - 响应与 2.1 相同，但返回的 `user.id` 为服务端内部 ID，请以它为准
 
+签名算法（`signature` 用十六进制小写，服务端比较前会转小写，所以大写也接受）：
+
+```python
+import hashlib, hmac, time
+
+secret = "与网关约定的共享密钥"          # 对应网关 deploy/.env 的 EXCHANGE_HMAC_SECRET
+external_user_id = "u_88231"
+ts = int(time.time())
+message = f"{external_user_id}.{ts}"
+signature = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+```
+
+必须知道的几点：
+
+- **密钥要双方一致，且必须在网关侧配置。** 网关的 `EXCHANGE_HMAC_SECRET` 为空时会直接返回
+  `403 FORBIDDEN`「未启用 App 侧可信直传」——这不是签名算错了，是模式 B 没开。
+  生成密钥：`openssl rand -hex 32`，填进 `deploy/.env` 后 `./ops.sh restart gateway`。
+- 密钥只放服务端之间，**不要下发到 App 客户端里**。签名必须由 App 后端计算。
+- `external_user_id` 一旦开户就与用户绑定，之后改名会被当成新用户（会开出新账号）。
+- 换 Token 会拿到一个新的限流桶（见 `deploy/README.md` 限流一节）。建议每个终端各自换取 Token，
+  不要用同一个 service token 代所有用户转发，否则限流会退化成全局桶。
+- **每次 `/auth/exchange` 都会新建一个 api_client（一个新的登录会话）**，同时刷新限流桶。
+  App 侧必须「换一次、用 12 小时」，不要每个请求都调 exchange，否则会不断堆积
+  refresh token 并使限流失效。
+- 同一签名在 300 秒容差窗口内可重复使用（服务端不做 nonce 去重）。
+
 ### 2.3 刷新与登出
 
 - `POST /auth/refresh`，body `{ "refresh_token": "rt_..." }` → 返回新的 `access_token`

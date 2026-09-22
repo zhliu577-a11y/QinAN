@@ -570,3 +570,38 @@ docker socket —— 挂上 socket 等价于把宿主机 root 交出去（可以
 重建命令一律走 `up -d --force-recreate` 而不是 `restart`：`nginx.conf` 是单文件
 bind mount，`restart` 只会重载容器创建时那个 inode；`.env` 的改动同样只有重建才生效。
 `ops.sh restart` 已经按这个来了。
+
+### 健康探针分层
+
+四个容器都有健康检查，但探的东西**故意不一样**：
+
+| 容器 | 探针 | 探的是什么 |
+|---|---|---|
+| `gateway` | `GET /api/v1/health` | 网关自己 + 数据库 + 引擎状态 |
+| `nginx` | `GET /healthz`（明文 80） | nginx 自己，**不经过 gateway** |
+| `opencode-N` | `GET /session`（带 basic auth） | 单个 agent 实例能否应答 |
+| `mock-model` | `GET /health` | 模拟模型进程 |
+
+nginx 的探针刻意不代理到 gateway：否则网关一挂就会把 nginx 也判成不健康，
+`ops.sh heal` 会去重建一个本来没问题的容器。也不走 TLS，省掉自签证书的校验问题。
+
+`/healthz` 在 80 与 443 都注册了（返回 `ok`，无任何信息泄露），云上的负载均衡
+也可以直接用它。
+
+### 模式 B（App 侧可信直传）
+
+App 侧已有用户体系时走这条路：App 后端用共享密钥签名换 Token，用户不需要二次登录。
+
+```bash
+# 1) 生成密钥（与 App 团队约定同一个值，只放服务端）
+openssl rand -hex 32
+
+# 2) 填进 deploy/.env 的 EXCHANGE_HMAC_SECRET，然后重建
+./ops.sh restart gateway
+
+# 3) 自检：密钥没配会返回 403「未启用 App 侧可信直传」；
+#    配了但签名不对会返回 401「签名校验失败」
+```
+
+密钥为空时 `/auth/exchange` 直接 403，这是**预期行为**（模式 B 默认关闭），
+不是故障。签名算法与注意事项见 `docs/API.md` 第 2.2 节。

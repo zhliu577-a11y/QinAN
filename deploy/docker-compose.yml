@@ -59,6 +59,15 @@ services:
       - ./certs:/etc/nginx/certs:ro
       - ./data/certbot:/var/www/certbot
       - ./data/nginx-logs:/var/log/nginx
+    # 探针打 nginx 自己的 /healthz，不经过 gateway：
+    # 网关挂掉时不该把 nginx 也判成不健康，否则 heal 会去重建一个没问题的容器。
+    # 用明文 80 而不是 https，省掉自签证书的校验问题。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-m", "3", "-o", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       gateway:
         condition: service_healthy

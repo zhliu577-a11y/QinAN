@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.errors import AppError, forbidden, invalid_input, not_found
@@ -219,6 +219,17 @@ async def list_tasks(
     query = select(Task).where(Task.user_id == auth.user.id)
     if status:
         query = query.where(Task.status == status)
+    # 和 get_task 的留存期口径保持一致：否则列表里还列着这条任务，
+    # 点进去却是 404，App 侧会看到自相矛盾的结果。
+    # 非终态（含 finished_at 为空）一律保留，只挡「终态且已过留存期」的。
+    cutoff = utcnow() - timedelta(days=settings.result_retention_days)
+    query = query.where(
+        or_(
+            Task.status.not_in(TERMINAL_STATUSES),
+            Task.finished_at.is_(None),
+            Task.finished_at >= cutoff,
+        )
+    )
     query = query.order_by(Task.created_at.desc(), Task.id.desc()).offset(offset).limit(limit + 1)
     result = await db.execute(query)
     rows = list(result.scalars().all())
