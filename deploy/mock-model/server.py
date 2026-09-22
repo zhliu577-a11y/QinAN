@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 PORT = 8000
-MODEL_ID = "deepseek-v4-flash"
+MODEL_ID = "deepseek-flash"
 MARKER = "【模拟模型】"
 
 # 流式输出的切片大小与间隔，让客户端的增量渲染路径能被真实走一遍

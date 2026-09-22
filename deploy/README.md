@@ -208,7 +208,7 @@ docker compose exec opencode-1 \
 
 ```
 MODEL_PROVIDER=deepseek                  # provider id（models.dev 清单里的）
-MODEL_NAME=deepseek-v4-flash             # model id
+MODEL_NAME=deepseek-flash                # model id（DeepSeek V4.1 Flash）
 MODEL_BASE_URL=https://api.deepseek.com/v1   # 服务地址；上线请显式填写
 MODEL_API_KEY=sk-xxxxxxxx                # 该地址签发的密钥
 ```
@@ -241,6 +241,20 @@ service 侧的落地方式是 `opencode/config/opencode.json` 覆写 `deepseek` 
 - `POST {MODEL_BASE_URL}/chat/completions` —— 对话
 
 所以自建网关、`api.deepseek.com`、任何一家 OpenAI 兼容代理都能直接换成 `MODEL_BASE_URL`。
+
+**当前选定的模型**：DeepSeek 官方 flash 档。`deepseek` 这个 provider 下 opencode 认得四个 id，
+其中两个是 flash，规格与单价完全一样（输入 $0.15 / 输出 $0.60 每百万 token、上下文 1M、
+支持工具调用），按代次取新的：
+
+| model id | 名称 | 说明 |
+|---|---|---|
+| `deepseek-flash` | DeepSeek V4.1 Flash | **当前默认**，2026-09-10 发布 |
+| `deepseek-v4-flash` | DeepSeek V4 Flash | 同代次的另一种命名，可作备选 |
+| `deepseek-v4-flash-vision-exp` | V4 Flash Vision Exp | 实验性视觉档，摘要任务用不上 |
+| `deepseek-v4-pro` | V4 Pro | 更强也更贵（输入 $0.435 / 输出 $0.87），需要时再换 |
+
+这份清单来自 `https://models.dev/api.json`（2026-09 核对）。**它只代表 opencode 认得这个名字，
+不代表你的账号真能调**——接上 key 之后务必用下面那条 `/models` 复核一次。
 
 **`MODEL_NAME` 必须是该地址真实提供的 id**。写错不会在启动时报错，而是第一次调用才失败。
 注意 `opencode models` 列的是 models.dev 的静态清单，**不代表你的网关真能调**；以
@@ -304,8 +318,9 @@ MODEL_API_KEY=mock-key-not-used
 > **实测记录**：把 `.env` 的 `MODEL_NAME` 改成 `probe-ctl-X`，然后执行
 > `docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3`：
 > gateway 容器 **ID 完全没变**（`5589e18208c6`，StartedAt 也没变），进程内
-> `MODEL_NAME` 仍是 `deepseek-v4-flash`，`/internal/status` 的 `config.model_name`
-> 也是旧值；提交任务后 mock-model 收到的请求是 `model=deepseek-v4-flash`。
+> `MODEL_NAME` 仍是改动前的旧值（当时是 `deepseek-v4-flash`，那次实测之后默认值已换成
+> `deepseek-flash`），`/internal/status` 的 `config.model_name` 也是旧值；
+> 提交任务后 mock-model 收到的请求是 `model=deepseek-v4-flash`。
 > 也就是说：**网关会一直用它启动时那份配置去问模型，改了 `.env` 也照样发旧的 model id。**
 > 配合真实服务商时，症状是「换了模型但账单/行为毫无变化」，而且不报任何错。
 
@@ -354,11 +369,11 @@ docker compose up -d              # 不点名：compose 自己算出该重建谁
 docker compose exec opencode-1 sh -c \
   'curl -s -H "Authorization: Bearer $MODEL_API_KEY" "$MODEL_BASE_URL/models"'
 
-# 2) 用你配置的 model id 真的问一句（把 deepseek-chat 换成你的 MODEL_NAME）
+# 2) 用你配置的 model id 真的问一句（把 deepseek-flash 换成你的 MODEL_NAME）
 docker compose exec opencode-1 sh -c \
   'curl -s -X POST "$MODEL_BASE_URL/chat/completions" \
      -H "Authorization: Bearer $MODEL_API_KEY" -H "Content-Type: application/json" \
-     -d "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: PONG\"}]}"'
+     -d "{\"model\":\"deepseek-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: PONG\"}]}"'
 ```
 
 第 2 条能回内容，就说明**地址 + 密钥 + 模型 id 三者都对**。
@@ -931,13 +946,22 @@ docker compose logs --tail 50 gateway
 
 ### 15.7 接真实模型
 
-默认值指向内置模拟模型，换成真实服务商只改四行：
+provider 与 model **已经填好**（DeepSeek + `deepseek-flash`），`.env.example` 里指向模拟模型的是
+地址与密钥这两行。所以接真实模型只改两行：
 
 ```
-MODEL_PROVIDER=deepseek
-MODEL_NAME=deepseek-chat
 MODEL_BASE_URL=https://api.deepseek.com/v1
 MODEL_API_KEY=sk-真实密钥
+```
+
+（`MODEL_PROVIDER=deepseek`、`MODEL_NAME=deepseek-flash` 保持默认即可；
+想换成 V4 Pro 之类，见第 5 节的模型清单与「换模型」三条规则。）
+
+确认 `api.deepseek.com` 通不通、key 有没有过期，一条命令就够（不需要 opencode）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://api.deepseek.com/v1/models     # 没带 key 应返回 401
+curl -s -H "Authorization: Bearer sk-真实密钥" https://api.deepseek.com/v1/models  # 带 key 应列出模型
 ```
 
 - `MODEL_NAME` 必须是**该地址真实提供的 id**：写错启动时不报错，第一次调用才失败。

@@ -39,7 +39,7 @@ os.environ.update(
         "SSE_PING_INTERVAL_SECONDS": "2",
         "LOG_LEVEL": "WARNING",
         "MODEL_PROVIDER": "deepseek",
-        "MODEL_NAME": "deepseek-v4-flash",
+        "MODEL_NAME": "deepseek-flash",
     }
 )
 

@@ -74,7 +74,7 @@ def main() -> int:
         print("== 文本任务：直接回摘要 ==")
         body = _post(
             {
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "messages": [
                     {"role": "system", "content": "你是资料摘要助手。"},
                     {
@@ -104,7 +104,7 @@ def main() -> int:
         ]
         body = _post(
             {
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "messages": url_messages,
                 "tools": [WEBFETCH_TOOL],
             }
@@ -121,7 +121,7 @@ def main() -> int:
         print("== 文本任务即便带 webfetch 工具也不该发工具调用 ==")
         body = _post(
             {
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "messages": [{"role": "user", "content": "## 本次任务\n请总结这段文字。"}],
                 "tools": [WEBFETCH_TOOL],
             }
@@ -132,7 +132,7 @@ def main() -> int:
         print("== URL 任务第二步：流式输出最终摘要 ==")
         lines = _post(
             {
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "stream": True,
                 "messages": url_messages
                 + [

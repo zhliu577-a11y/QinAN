@@ -79,9 +79,11 @@ class Settings(BaseSettings):
     # 由 MODEL_BASE_URL / MODEL_API_KEY 注入（见 opencode/config/opencode.json）。
     # provider id 与 model id 必须真实存在，写错不会在启动时报错，而是等到第一次调用才失败。
     # 查询方式：https://models.dev/api.json，或进入容器执行 opencode models
-    # 默认指向 DeepSeek 协议下的 deepseek-v4-flash（经内网网关或官方直连均可）。
+    # 默认是 DeepSeek 官方的 flash 档：deepseek-flash（V4.1 Flash，1M 上下文）。
+    # 同族的 deepseek-v4-flash（V4 Flash）规格与单价一样，可作备选。
+    # 注意 models.dev 的清单不等于「你的账号/网关真能调」，最终以 GET {MODEL_BASE_URL}/models 为准。
     model_provider: str = "deepseek"
-    model_name: str = "deepseek-v4-flash"
+    model_name: str = "deepseek-flash"
     summarizer_agent: str = "summarizer"
 
     # ===== 存储 =====
