@@ -680,6 +680,7 @@ Start-ScheduledTask -TaskName 'QinAN demo VM (headless)'   # 手动拉起来
 ### 15.2 装 Docker，配镜像加速器（境内必做）
 
 ```bash
+sudo apt-get update && sudo apt-get install -y git
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker "$USER" && newgrp docker    # 免 sudo；重登一次才彻底生效
 docker compose version                              # 需要 v2，命令是 docker compose（不是 docker-compose）
@@ -700,14 +701,63 @@ docker info | grep -A2 'Registry Mirrors'    # 确认已生效
 
 镜像**内部**的依赖下载已经走国内源（`registry.npmmirror.com`、清华 PyPI），不用另外配。
 
-### 15.3 取代码
+### 15.3 把代码和镜像弄到新机器上（二选一）
+
+**先说清楚一件事：新机器上不需要自己装 opencode，也不需要 node / npm / python。**
+opencode 由 `opencode/Dockerfile` 在构建期从 npm 装进镜像，版本钉在
+`ARG OPENCODE_VERSION=1.18.31`（升级就改这一行再重建）。宿主机上需要的只有
+`git` 和 `docker`（含 compose v2），别的一律不用装。
+
+构建期要下载两处依赖，所以新机器得能访问这两个镜像源（都在境内，一般没问题）：
+
+| 镜像 | 下载源 |
+|---|---|
+| `agent-opencode` | `registry.npmmirror.com`（npm 装 opencode-ai） |
+| `agent-gateway` | 清华 PyPI |
+
+**方式 A：新机器能上外网** —— 直接克隆（构建见 15.6）：
 
 ```bash
 git clone https://ghfast.top/https://github.com/zhliu577-a11y/QinAN.git
 cd QinAN/deploy
 ```
 
-服务器直连 GitHub 不通时用上面的加速前缀（同一个仓库，另有 `ghproxy.net` 可用）。
+直连 GitHub 不通时用上面的加速前缀（同一个仓库，另有 `ghproxy.net` 可用）。
+
+**方式 B：新机器不能上外网 / 网络很差** —— 在任意一台能上网的机器上构建好，
+把镜像打包带过去（已实测，包体约 **320 MB**）：
+
+```bash
+# 在能上网的机器上：先克隆仓库并完整构建过一次，再打包镜像
+git clone https://ghfast.top/https://github.com/zhliu577-a11y/QinAN.git
+cd QinAN/deploy && docker compose up -d --build
+docker save agent-opencode:local agent-gateway:local agent-mock-model:local \
+            nginx:1.27-alpine -o qinan-images.tar
+
+# 把整个 QinAN 目录和 qinan-images.tar 一起拷到新机器（U 盘 / scp 都行）
+
+# 新机器上：装好 docker，然后
+cd QinAN/deploy
+docker load -i /home/user/qinan-images.tar   # 期望 4 行 Loaded image
+docker compose up -d                         # 注意：不带 --build
+```
+
+方式 B 里新机器**不执行任何 `git clone`**（它上不了外网），代码是从那台能上网的
+机器上拷过去的。几点都实测过：
+
+- **带什么过去**：四个镜像共 361 MB（save 成单个 tar 是 321 MB），
+  加上代码（整个仓库 840 KB / 58 个文件）。一个 U 盘装得下。
+- **tar 不用再 gzip**：Docker 的层本身就是压缩的，实测 321 MB → gzip 后 319 MB，
+  白费一次压缩时间。
+- **只拷 `deploy/` 目录也够**。`build:` 的 context 目录不存在并不影响启动——
+  我在缺 context 的情况下实跑了一次 `docker compose up -d`，compose 发现镜像
+  已存在就直接用了，根本不去碰那个目录。但还是建议把整个仓库拷过去：多 3 MB，
+  换来以后想改配置、想重新构建、想 `git pull` 时源码都在。
+- **别再用 `up -d --build`**：那会重新走一遍构建、又需要联网，而且这时 context
+  若不存在就会失败。改配置用 `--force-recreate`（15.7），改代码才需要回到
+  能上网的机器重建并重新 save/load。
+- 顺带一提，万一某个镜像没 load 成功，失败模式很干脆：compose 会转而尝试构建，
+  然后报 context 找不到。见到那个报错就回头查 `docker load` 少拿了哪个镜像。
 
 ### 15.4 写 `.env`（唯一需要手工填的文件）
 
