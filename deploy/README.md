@@ -374,13 +374,46 @@ curl -s -N "https://agent.example.com/api/v1/tasks/<task_id>/events?token=$TOKEN
 **webfetch 根本不会发生**，所以 url 任务的 `fetched_chars` 恒为 `null`。
 要验证抓取与 `source` 字段就必须用 `MOCK_MODE=false`。
 
-## 8. 扩容到 4 个实例
+## 8. 扩容到更多实例
 
-1. 复制一份 `opencode-3` 服务块，改名 `opencode-4`，换容器名、`OC4_PASSWORD`、卷名 `oc4-data`
-2. 在 `gateway.environment.OPENCODE_INSTANCES` 末尾追加 `,opencode-4:4096:${OC4_PASSWORD}`
-3. 在 `gateway.depends_on` 里加上 `opencode-4`
-4. 在 `volumes:` 段加 `oc4-data:`，在 `.env` 加 `OC4_PASSWORD`
-5. `docker compose up -d`
+实例数量就是 `docker-compose.yml` 里 `opencode-N` 服务块的个数，**没有自动扩缩容**。
+加一个实例要同步改四处，少改哪一处的后果都不同：
+
+| # | 改哪里 | 漏掉的后果 |
+|---|---|---|
+| 1 | 复制一份 `opencode-3` 服务块 → `opencode-4`，改 `container_name`、`OPENCODE_SERVER_PASSWORD`、卷名 `oc4-data` | 容器起不来 |
+| 2 | `gateway.environment.OPENCODE_INSTANCES` 末尾追加 `,opencode-4:4096:${OC4_PASSWORD}` | **容器起来了、也是 healthy，但网关不知道它存在，永远不派活**——最隐蔽的一种 |
+| 3 | `gateway.depends_on` 加上 `opencode-4` | 网关照常在实例就绪前起来，开头几十秒的任务失败 |
+| 4 | 顶层 `volumes:` 加 `oc4-data:`；`.env` 加 `OC4_PASSWORD` | compose 报卷未定义 / 实例密码为空起不来 |
+
+两条实测踩到的坑：
+
+- **第 2 步不要用「把 `${OC3_PASSWORD}` 替换掉」这种改法**：这个占位符在文件里出现两次
+  （第 90 行的实例名册、第 139 行的 `OPENCODE_SERVER_PASSWORD`），按占位符替换很容易改错那一处，
+  结果名册没变、实例照样不被派活。要锚定整行的 `opencode-3:4096:${OC3_PASSWORD}` 再追加。
+- **新实例不要写 `build:`**。三个实例共用 `agent-opencode:local` 这个 tag，多处写 `build`
+  会并行构建抢写同一个 tag，报 `image agent-opencode:local already exists`。
+  新块只用 `image:`，镜像已经在了。
+
+改完：
+
+```bash
+docker compose config >/dev/null && echo "语法 OK"   # 先验语法
+docker compose up -d                                 # 不需要 --build，复用现成镜像
+./ops.sh instances                                   # 名册里要能看到 oc-4
+```
+
+`./ops.sh instances` 是**唯一能证明扩容真的生效**的检查。`docker compose ps` 里
+`agent-opencode-4` 是 healthy 只说明容器活着，不代表网关认得它。
+
+实测（3 → 4）：7 个容器全部 healthy，`/internal/instances` 返回
+`{"total": 4, "idle": 4, "healthy": 4}`；用 4 个用户各提交 1 条并发任务，
+4 个实例都被观察到 `busy`，4 条任务全部 `succeeded`。
+实例 id 是按 `OPENCODE_INSTANCES` 里的**顺序**生成的（`oc-1`、`oc-2`…），
+顺序决定 id，与容器主机名无关。
+
+`NO_PROXY` 里逐个列出的实例名不用跟着改：实例之间不互相调用，那几个名字是防御性写的。
+`./ops.sh restart opencode` 会自己从 compose 读出实例列表，新实例也能一起重建。
 
 ## 9. 证书续期
 
@@ -626,3 +659,187 @@ Start-ScheduledTask -TaskName 'QinAN demo VM (headless)'   # 手动拉起来
 > 虚拟机不会自己起来。要做到真正与登录无关，必须以管理员身份装
 > `VBoxAutostartSvc` 并配 `autostart.cfg`（或把计划任务改成「计算机启动时」+ 以
 > SYSTEM 运行）。这是当前唯一需要管理员权限才能补的运维项。
+
+## 15. 真实服务器部署清单
+
+前面各节讲的是单个环节怎么弄，这一节是**从一台空机器到手机能用的完整顺序**。
+每一步都配了验证命令，验不过别往下走——这个项目里「容器 healthy」跟「真的能用」
+是两件不同的事（模型配置写错、名册漏改、`engine: ready` 都踩过这个坑）。
+
+### 15.1 动手前先定下来的事
+
+| 项 | 建议 | 说明 |
+|---|---|---|
+| 服务器 | 4 vCPU / 4 GB 起步，**推荐 8 GB**，至少加 2 GB swap | 每个 opencode 实例是一个 Node 进程；4 GB 跑 3 个实例没有 swap 会吃紧 |
+| 系统盘 | ≥ 40 GB | 镜像 2.5 GB + 构建缓存 1.3 GB + 数据卷 |
+| 系统 | Ubuntu 22.04 / 24.04 | 演示环境就是 24.04，其他发行版未验证 |
+| 域名 | **已备案**（境内服务器） | 未备案域名走 80/443 会被拦，只能改用高位端口 |
+| 安全组 | 只放行 80、443（加你的 SSH 端口） | 其余一律不放开：gateway 与 opencode 都没有映射端口，不需要 |
+| TLS 证书 | 正式证书 → `certs/fullchain.pem`、`certs/privkey.pem` | `nginx.conf` 强制 TLS，证书缺失时 nginx 直接启动失败 |
+
+### 15.2 装 Docker，配镜像加速器（境内必做）
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker "$USER" && newgrp docker    # 免 sudo；重登一次才彻底生效
+docker compose version                              # 需要 v2，命令是 docker compose（不是 docker-compose）
+```
+
+`registry-1.docker.io` 在境内直连超时（实测），不配加速器会一直卡在拉基础镜像上。
+按第 2 节「拉取镜像（境内必做）」写 `/etc/docker/daemon.json`：
+
+```bash
+sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'
+{
+  "registry-mirrors": ["https://docker.m.daocloud.io"]
+}
+JSON
+sudo systemctl restart docker
+docker info | grep -A2 'Registry Mirrors'    # 确认已生效
+```
+
+镜像**内部**的依赖下载已经走国内源（`registry.npmmirror.com`、清华 PyPI），不用另外配。
+
+### 15.3 取代码
+
+```bash
+git clone https://ghfast.top/https://github.com/zhliu577-a11y/QinAN.git
+cd QinAN/deploy
+```
+
+服务器直连 GitHub 不通时用上面的加速前缀（同一个仓库，另有 `ghproxy.net` 可用）。
+
+### 15.4 写 `.env`（唯一需要手工填的文件）
+
+```bash
+cp .env.example .env
+chmod 600 .env        # 里面有 JWT 与实例密码
+```
+
+**必改项**（其余保持默认）：
+
+| 变量 | 填什么 | 生成 |
+|---|---|---|
+| `PUBLIC_BASE_URL` | `https://你的域名` | —— |
+| `JWT_SECRET` | 随机 | `openssl rand -hex 32` |
+| `ADMIN_TOKEN` | 随机 | `openssl rand -hex 24` |
+| `OC1_PASSWORD` / `OC2_PASSWORD` / `OC3_PASSWORD` | 三把**互不相同**的随机值 | 各 `openssl rand -hex 24` |
+| `CALLBACK_HMAC_SECRET` | 随机；完全不用回调可以不管 | `openssl rand -hex 32` |
+| `CALLBACK_ALLOWED_HOSTS` | App 后端的域名，逗号分隔（**空着会拒掉所有回调**） | —— |
+| `EXCHANGE_HMAC_SECRET` | 只有用模式 B 才填，与 App 团队约定同一个值 | `openssl rand -hex 32` |
+| `MODEL_*` | 见 15.7 | —— |
+
+再确认三项默认值符合预期：
+
+- `MOCK_MODE=false` —— 保持 false。**上线前最后一个动作就是确认它是 false、且 `MODEL_BASE_URL` 不是 `mock-model`。**
+- `DEFAULT_DAILY_QUOTA` —— 每人每天的任务条数，默认 30。
+- `CORS_ALLOW_ORIGINS` —— 原生 App 留空；H5 / WebView 填来源域名。
+
+`.env` 整份被 `env_file` 注入 gateway 容器，改完必须重建容器才生效（`restart` 不重新读）。
+
+### 15.5 放证书
+
+```bash
+mkdir -p certs
+# 把正式证书放成这两个文件名（nginx.conf 里写死的）：
+#   certs/fullchain.pem
+#   certs/privkey.pem
+```
+
+没有域名时只能用自签证书演练（`./gen-self-signed-cert.sh <IP或域名>`，见第 2 节）。
+自签会让 App 报证书不受信任，**不要用于生产**。
+
+### 15.6 首次构建与启动
+
+```bash
+docker compose config >/dev/null && echo "语法 OK"
+docker compose up -d --build        # 首次要构建三个镜像，慢是正常的
+docker compose ps                   # 六个容器都应是 healthy
+```
+
+六个容器：`nginx`（唯一对外）、`gateway`、`opencode-1/2/3`、`mock-model`
+（模拟模型，接上真实模型后可以 `docker compose stop mock-model` 省资源）。
+
+```bash
+curl -s https://你的域名/healthz            # 期望 ok
+curl -s https://你的域名/api/v1/health      # 期望 engine: ready
+docker compose logs --tail 50 gateway
+```
+
+注意 `/api/v1/health` 的 `engine: ready` 只说明三个 opencode 实例在，**不代表模型能用**。
+
+### 15.7 接真实模型
+
+默认值指向内置模拟模型，换成真实服务商只改四行：
+
+```
+MODEL_PROVIDER=deepseek
+MODEL_NAME=deepseek-chat
+MODEL_BASE_URL=https://api.deepseek.com/v1
+MODEL_API_KEY=sk-真实密钥
+```
+
+- `MODEL_NAME` 必须是**该地址真实提供的 id**：写错启动时不报错，第一次调用才失败。
+  用 `curl -s -H "Authorization: Bearer $MODEL_API_KEY" "$MODEL_BASE_URL/models"` 查实际有哪些。
+- `MODEL_BASE_URL` 必须 OpenAI 兼容（`GET /models` 列模型、`POST /chat/completions` 对话）。
+- 只换地址 / 密钥 / 模型 → 重建实例即可，**不用重新构建镜像**：
+
+```bash
+docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3
+```
+
+- 换**服务商**（改 `MODEL_PROVIDER` 的取值）才需要动 `opencode/config/opencode.json`
+  里覆写的那个 provider 键名（当前是 `deepseek`），两处必须同名，然后
+  `docker compose up -d --build opencode-1`。
+
+连通性自测——在实例里直接问一句，能回 PONG 说明地址 + 密钥 + 模型 id 三者都对：
+
+```bash
+docker compose exec opencode-1 \
+  opencode run --model deepseek/deepseek-chat 'Reply with exactly: PONG'
+```
+
+然后跑一个真实任务，并**按第 5 节「模拟覆盖不到的东西」那张表逐项确认**：
+tokens/cost、超时回收、抓取失败、多轮工具调用在模拟下都证明不了。
+
+### 15.8 开户
+
+管理接口 `/internal/*` 在 nginx 上是 `deny all`，必须从容器内打（第 6 节）：
+
+```bash
+ADMIN_TOKEN=$(grep ^ADMIN_TOKEN= .env | cut -d= -f2-)
+docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users \
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"username":"zhangsan","password":"强密码","display_name":"张三","daily_quota":30}'
+```
+
+模式 B（App 侧可信直传）由 `/api/v1/auth/exchange` 自动开户，不用手工开。
+
+> **目前没有「用户自助改密码」的接口**。改密码只能走管理接口：
+> `PATCH /internal/users/{id}`，body `{"password":"新密码"}`。所以密码要在开户后
+> 立刻设成最终值再交给本人，重置也由运营方执行。要终端用户能自己改，需要 App 团队
+> 与网关一起加一个接口。
+
+### 15.9 上线前检查表
+
+逐条打勾，每条都是能验的：
+
+- [ ] `docker compose ps` 六个容器（含 `mock-model`）都是 `healthy`
+- [ ] `https://域名/healthz` 返回 `ok`
+- [ ] `https://域名/api/v1/health` 返回 `engine: ready`，且 `pool_total` 等于实例数
+- [ ] `./ops.sh instances` 里每个实例都是 `idle`（或 `busy`），没有 `unhealthy`
+- [ ] `MOCK_MODE=false` **且** `MODEL_BASE_URL` 不是 `mock-model`
+- [ ] 真实模型上提交过一个 url 任务，`source.fetched_chars` 是真实数字
+- [ ] `.env` 里默认密码一个不剩：`grep -n 'please-change-me' .env` 没有输出
+- [ ] `.env` 权限是 `600`，且没被提交进 git（`git status` 里看不到它）
+- [ ] 安全组只开了 80/443；`docker compose ps` 里 gateway / opencode 没有端口映射
+- [ ] 宿主机重启后能自愈（第 14 节：容器 `restart: unless-stopped` + `docker.service` enabled）
+- [ ] `./ops.sh backup` 跑通一次，`backup/` 下生成了两个 tgz
+
+### 15.10 上线之后
+
+- 日常运维只有一个入口：`./ops.sh status`（第 14 节）
+- 扩容：第 8 节（四处同步改，用 `./ops.sh instances` 验证）
+- 证书续期：第 9 节；备份与恢复：第 10 节
+- 定期 `./ops.sh backup`，并把 `backup/` 复制到**另一台机器**——
+  备份和业务数据放在同一台机器上不算备份

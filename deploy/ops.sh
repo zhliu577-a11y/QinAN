@@ -61,10 +61,18 @@ resolved_targets() {
   case "$1" in
     gateway)   echo "gateway" ;;
     nginx)     echo "nginx" ;;
-    opencode)  echo "opencode-1 opencode-2 opencode-3" ;;
-    all)       echo "gateway nginx opencode-1 opencode-2 opencode-3" ;;
+    opencode)  opencode_services ;;
+    all)       echo "gateway nginx $(opencode_services)" ;;
     *)         die "未知目标 '$1'（可选：gateway|nginx|opencode|all）" ;;
   esac
+}
+
+# 实例个数从 compose 里读，不写死：扩容到第 4 个实例之后，
+# `restart opencode` / `restart all` 必须也能带上它，否则新实例改了配置却重启不到。
+# sort -V 让 opencode-10 排在 opencode-9 之后。
+opencode_services() {
+  "${COMPOSE[@]}" config --services 2>/dev/null \
+    | grep -E '^opencode-' | sort -V | tr '\n' ' ' | sed 's/ *$//'
 }
 
 cmd_status() {
@@ -147,6 +155,8 @@ cmd_restart() {
   [ $# -ge 1 ] || die "用法: ops.sh restart <gateway|nginx|opencode|all>"
   local targets
   targets="$(resolved_targets "$1")" || exit 1
+  # 空目标会让 `up -d --force-recreate` 变成「重建所有服务」，比报错危险得多
+  [ -n "$targets" ] || die "没解析出要重建的服务，检查 docker-compose.yml"
   echo "重建: $targets"
   # 一律用 --force-recreate 而不是 restart：
   #   * nginx.conf 是单文件 bind mount，restart 只会重载「容器创建时那个 inode」，
