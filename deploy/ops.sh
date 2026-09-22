@@ -151,6 +151,32 @@ cmd_logs_api() {
   api "/internal/logs${query}" | pretty
 }
 
+cmd_apply() {
+  # 把改动落地，但不点名任何服务 —— 让 compose 自己算哪个服务需要重建。
+  #
+  # compose 会把 env_file 的内容算进每个服务的配置哈希，所以改 .env 之后
+  # 不点名地跑一次 up -d，它会精确重建受影响的服务（实测：只改某个实例的密码，
+  # 就只有那个实例和 gateway 被重建，另外两个实例不动）。
+  #
+  # 反过来，`up -d --force-recreate opencode-1 opencode-2 opencode-3` 这种
+  # 「点名 + force」的写法会跳过这套判断，把没点名的服务留在旧配置上 ——
+  # 那正是「改了 MODEL_NAME，gateway 却仍然下发旧 model id」的成因。
+  # 所以改 .env 用本命令；只有 bind mount 的内容变化（nginx.conf）检测不到，
+  # 才需要 restart nginx 去强制重建。
+  echo "按 .env 现状同步容器（compose 自行判断重建谁）"
+  # shellcheck disable=SC2086
+  "${COMPOSE[@]}" up -d || die "同步失败"
+  echo -n "等待健康"
+  if wait_healthy 60; then
+    echo " 已就绪"
+    cmd_status
+  else
+    echo " 超时"
+    echo "看日志: ./ops.sh logs gateway -n 100" >&2
+    exit 1
+  fi
+}
+
 cmd_restart() {
   [ $# -ge 1 ] || die "用法: ops.sh restart <gateway|nginx|opencode|all>"
   local targets
@@ -158,11 +184,12 @@ cmd_restart() {
   # 空目标会让 `up -d --force-recreate` 变成「重建所有服务」，比报错危险得多
   [ -n "$targets" ] || die "没解析出要重建的服务，检查 docker-compose.yml"
   echo "重建: $targets"
-  # 一律用 --force-recreate 而不是 restart：
-  #   * nginx.conf 是单文件 bind mount，restart 只会重载「容器创建时那个 inode」，
-  #     改过的配置看不到，必须重建容器；
-  #   * .env / compose 的改动同样只有重建才生效。
-  # 频率很低（改配置、修故障），慢一点换「永远是对的」。
+  # 一律用 --force-recreate 而不是 restart：restart 只是重启进程，
+  # 不会重新读 .env（环境变量在容器创建时就固定了），nginx.conf 这种单文件
+  # bind mount 更是只重载「容器创建时那个 inode」，改过的内容看不到。
+  # 注意这里是「点名重建」：只动 $targets 里的服务。
+  # 改 .env 请用 `ops.sh apply`（不点名，compose 自己算要重建谁），
+  # 点名重建只用于「就是要重启这几个」的场景。
   # 注意 gateway 是单 worker、状态全在进程内，重建会打断在飞任务 ——
   # 启动时 _recover_orphans 会把它们放回队列重试一次，不会永久卡在 running。
   # shellcheck disable=SC2086
@@ -255,7 +282,8 @@ cmd_help() {
   user <用户名|用户ID>        单个用户详情：配额用量、任务分布、设备、实例绑定
   users                       用户列表
   metrics                     池与队列指标
-  restart <目标>              重建：gateway|nginx|opencode|all
+  apply                       把 .env 的改动落地（不点名服务，compose 自己判断重建谁）
+  restart <目标>              点名重建：gateway|nginx|opencode|all
   heal                        只重建不健康的容器
   shell <服务>                进容器
   backup                      备份 gateway-data 与 workspace 卷
@@ -276,6 +304,7 @@ main() {
     user)      cmd_user "$@" ;;
     users)     cmd_users "$@" ;;
     metrics)   cmd_metrics "$@" ;;
+    apply)     cmd_apply "$@" ;;
     restart)   cmd_restart "$@" ;;
     heal)      cmd_heal "$@" ;;
     shell)     cmd_shell "$@" ;;

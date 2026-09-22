@@ -253,8 +253,8 @@ MODEL_BASE_URL=http://mock-model:8000/v1
 MODEL_API_KEY=mock-key-not-used
 ```
 
-如果是从真实模型切回来，重建实例让变量生效（见下面「改完 .env 要重建谁」）：
-`docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3`。
+如果是从真实模型切回来，改完 `.env` 跑 `docker compose up -d` 落地（不要点名服务，
+原因见下面「换模型 / 换服务商」）。
 
 `deploy/mock-model/` 是 OpenAI 兼容的假模型，**只用 python 标准库**（构建不装依赖，
 断网也能构建）。它的行为是确定性的，所以可以做自动化断言：
@@ -294,23 +294,42 @@ MODEL_API_KEY=mock-key-not-used
 `model_provider` / `model_name`），由 `dispatcher` 在派发时逐个任务下发
 （`gateway/app/services/dispatcher.py` 的 `provider_id=` / `model_id=`）。
 
-> **实测记录**：把 `.env` 的 `MODEL_NAME` 改成 `probe-ctl-X`，只重建三个 opencode 实例后：
+> **实测记录**：把 `.env` 的 `MODEL_NAME` 改成 `probe-ctl-X`，然后执行
+> `docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3`：
 > gateway 容器 **ID 完全没变**（`5589e18208c6`，StartedAt 也没变），进程内
 > `MODEL_NAME` 仍是 `deepseek-v4-flash`，`/internal/status` 的 `config.model_name`
 > 也是旧值；提交任务后 mock-model 收到的请求是 `model=deepseek-v4-flash`。
 > 也就是说：**网关会一直用它启动时那份配置去问模型，改了 `.env` 也照样发旧的 model id。**
 > 配合真实服务商时，症状是「换了模型但账单/行为毫无变化」，而且不报任何错。
 
+**这个坑的根因不是「compose 不会检测变化」，而是那条命令点名了服务。**
+`up -d` 后面一旦点名服务，compose 就只处理点到的那几个；没点名的即使配置变了也不动。
+不点名地跑 `docker compose up -d` 时，compose 会把每个服务的 `env_file` 内容算进配置
+哈希，**精确重建真正受影响的服务**。实测（改不同变量后跑不点名的 `up -d`）：
+
+| 只改这个变量 | 谁被重建 | 谁没动 |
+|---|---|---|
+| `DEFAULT_DAILY_QUOTA`（只有 gateway 读） | gateway | opencode-1/2/3、nginx |
+| `MODEL_BASE_URL`（opencode 读，但它是 `.env` 的一部分） | opencode-1/2/3 **和 gateway** | nginx |
+| `OC1_PASSWORD` | oc-1 **和 gateway** | oc-2、oc-3、nginx |
+
+注意第二、三行：因为 gateway 用 `env_file: .env` 吃整份文件，**改 `.env` 里任何一个
+值都会让 gateway 被重建**。这听着浪费，但正是它保证了 gateway 永远不会停留在旧配置上。
+
 另外，`MODEL_PROVIDER` 与 `opencode.json` 的键名必须同名：`opencode.json` 覆写的是名叫
 `deepseek` 的 provider，若 `MODEL_PROVIDER` 改成别的 id，配置就要同步改键名，
 否则覆写不生效、请求会打到官方地址。
 
-环境变量只在容器创建时注入，`restart` 不生效。除非你很确定只动了 opencode 那一半
-（`MODEL_BASE_URL` / `MODEL_API_KEY` / 抓取代理），否则**两边一起重建最省事**：
+环境变量只在容器创建时注入，`docker compose restart` 不生效。改完 `.env` 要这样落地：
 
 ```bash
-docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3
+docker compose up -d              # 不点名：compose 自己算出该重建谁
+# 或者等价的封装（会顺带等服务健康）
+./ops.sh apply
 ```
+
+**不要点名**，也不要加 `--force-recreate`：`--force-recreate` 只在你确实想「无条件重启
+这几个」时用（比如改完 `nginx.conf`）。改 `.env` 时加它反而会绕过 compose 的变化检测。
 
 > 重建实例后 **前 10~30 秒不要提交任务**：池子的健康检查每 10 秒一轮、连续 3 次失败才
 > 标记不可用，所以这段时间里网关仍会往刚重启、还没 bootstrap 完的实例派活。
@@ -899,14 +918,16 @@ MODEL_API_KEY=sk-真实密钥
 - `MODEL_NAME` 必须是**该地址真实提供的 id**：写错启动时不报错，第一次调用才失败。
   用 `curl -s -H "Authorization: Bearer $MODEL_API_KEY" "$MODEL_BASE_URL/models"` 查实际有哪些。
 - `MODEL_BASE_URL` 必须 OpenAI 兼容（`GET /models` 列模型、`POST /chat/completions` 对话）。
-- 改完 `.env` **重建 gateway 和三个实例**，**不用重新构建镜像**（`MODEL_PROVIDER`/`MODEL_NAME`
-  gateway 自己也读一份，只重建 opencode 会出现「换了模型但仍按旧 model id 发请求」，
-  详见第 5 节实测记录）：
+- 改完 `.env` 用**不点名**的 `up -d` 落地，**不用重新构建镜像**：
 
 ```bash
-docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3
-docker compose ps                                   # 等六个容器都 healthy 再提交任务
+docker compose up -d        # 不要点名服务，也不要 --force-recreate
+docker compose ps           # 等六个容器都 healthy 再提交任务
 ```
+
+  为什么强调「不点名」：`up -d` 后面点名了服务，compose 就只处理那几个，没点名的
+  即使配置变了也不动——`MODEL_PROVIDER`/`MODEL_NAME` gateway 自己也读一份，
+  漏掉 gateway 会导致「换了模型但仍按旧 model id 发请求」，详见第 5 节实测记录。
 
 - 换**服务商**（改 `MODEL_PROVIDER` 的取值）还要动 `opencode/config/opencode.json`
   里覆写的那个 provider 键名（当前是 `deepseek`），两处必须同名，然后
@@ -972,28 +993,36 @@ docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users
 
 ## 16. 改动速查：改什么用什么命令
 
-**先记住一个前提**：环境变量只在**容器创建时**注入，`docker compose restart`
-读不到新值。所以下表里凡涉及 `.env` 或 `compose` 的改动，一律用
-`--force-recreate`（`restart` 只对「进程自己崩了」有用，而那种情况
-`restart: unless-stopped` 已经自动处理了）。所有命令都在 `deploy/` 目录下执行。
+**先记住两条前提**：
+
+1. 环境变量只在**容器创建时**注入，`docker compose restart` 读不到新值。
+   而「进程自己崩了」这种情况 `restart: unless-stopped` 已经处理了，不用手工干预。
+2. **改 `.env` 不要点名服务、不要加 `--force-recreate`**，直接 `docker compose up -d`。
+   compose 会把 `env_file` 内容算进每个服务的配置哈希，自己算出该重建谁；
+   一旦点名，没点到的服务即使配置变了也不会动（第 5 节实测过这个坑）。
+
+所有命令都在 `deploy/` 目录下执行。
 
 | 你要改的东西 | 命令 | 备注 |
 |---|---|---|
-| 配额、限流、超时、回调等网关参数 | 改 `.env` → `./ops.sh restart gateway` | ops.sh 的 `restart` 就是 `--force-recreate` |
-| 模型 id / provider | 改 `.env` 的 `MODEL_NAME`/`MODEL_PROVIDER` → `docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3` | **必须带上 gateway**，见第 5 节实测记录 |
-| 模型地址 / 密钥 | 改 `.env` 的 `MODEL_BASE_URL`/`MODEL_API_KEY` → `docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3` | 只有 opencode 读这两个 |
-| 实例密码 | 改 `.env` 的 `OC*_PASSWORD` → `docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3` | 网关名册里也带着同一份密码 |
-| nginx 配置（限流、超时、路由） | 改 `nginx.conf` → `docker compose up -d --force-recreate nginx` | 单文件 bind mount，`restart`/`reload` 都看不到新内容 |
+| **任何 `.env` 改动**（配额、模型、密码、密钥…） | 改 `.env` → `./ops.sh apply`（等价于不点名的 `docker compose up -d`） | 一律同一条命令，不用记「谁该重建」 |
+| nginx 配置（限流、超时、路由） | 改 `nginx.conf` → `docker compose up -d --force-recreate nginx` | 单文件 bind mount，内容变化 compose **检测不到**，必须强制重建 |
 | agent 权限、`agents/*.md`、`opencode.json` | 改文件 → `docker compose up -d --build opencode-1` | 这些**构建进镜像**，`--force-recreate` 不够 |
 | opencode 版本 | 改 `opencode/Dockerfile` 的 `ARG OPENCODE_VERSION` → `docker compose up -d --build opencode-1` | 同上 |
 | gateway 代码 | 改 `gateway/app/**` → `docker compose up -d --build gateway` | |
 | 实例数量 | 改 `docker-compose.yml` 四处（第 8 节）→ `docker compose up -d` | 不用 `--build`，新实例复用现成镜像 |
 | 证书 | 覆盖 `certs/*.pem` → `docker compose exec nginx nginx -s reload` | 证书是 bind mount，`reload` 就够（与 `nginx.conf` 不同） |
+| 就是想无条件重启某几个服务 | `./ops.sh restart gateway`／`restart opencode`／`restart all` | 点名 + `--force-recreate`，**不用于 `.env` 落地** |
+
+一句话版本：**`.env` 改动 → `./ops.sh apply`；镜像里的东西（代码、`opencode.json`、
+agent 定义、opencode 版本）→ `--build`；`nginx.conf` → `--force-recreate nginx`；
+证书 → `reload`。**
 
 **常用开关与查看**：
 
 ```bash
 ./ops.sh status                       # 先看这个：容器 + 对外健康 + 网关自检
+./ops.sh apply                        # 把 .env 的改动落地（compose 自己算该重建谁）
 ./ops.sh instances                    # 每个实例忙不忙、失败几次、挂了几个会话
 ./ops.sh logs gateway -f              # 跟日志；ops.sh logs <服务名> 可换 nginx/opencode-1
 ./ops.sh user zhangsan                # 单用户：配额用量、任务分布、实例绑定
