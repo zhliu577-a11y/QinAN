@@ -558,7 +558,16 @@ docker compose up -d --build                  # 重新构建并启动
 - 镜像构建已默认走 `registry.npmmirror.com`（opencode）与清华 PyPI 镜像（Python 包）
 - 如果拉基础镜像慢，给 Docker 配国内镜像加速器
 - `nginx:1.27-alpine` 与 `python:3.12-slim` 也建议走加速器
-- 需要抓境外网页时，在 `.env` 里填 `FETCH_HTTP_PROXY` / `FETCH_HTTPS_PROXY`，只有 opencode 实例会用到
+- 需要抓境外网页时，在 `.env` 里填 `FETCH_HTTP_PROXY` / `FETCH_HTTPS_PROXY`，只有 opencode 实例会用到。
+
+  **注意这两个是实例的全局出网代理，不是「只作用于抓取」**：填上之后模型调用也会走它。
+  因此模型地址必须同时加进 `docker-compose.yml` 里各实例的 `NO_PROXY`，否则会静默地
+  把模型打挂。实测：`FETCH_HTTP_PROXY` 指向一个坏地址、模型域名不在 `NO_PROXY` 时，
+  模型端收到 **0 个请求**，任务在 66 秒后 `failed`，opencode 日志报
+  `AI_APICallError: Cannot connect to API: Unable to connect. Is the computer able to access the url?`；
+  把模型主机加进 `NO_PROXY` 后请求立刻正常到达模型端。
+
+  推论：**用国内模型 + 不需要抓境外网页时，这两个变量留空，最省事**。
 
 ## 13. 容量实测（3 实例 / 4 vCPU 虚拟机）
 
