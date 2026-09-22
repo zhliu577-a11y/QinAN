@@ -796,7 +796,7 @@ Start-ScheduledTask -TaskName 'QinAN demo VM (headless)'   # 手动拉起来
 | 服务器 | 4 vCPU / 4 GB 起步，**推荐 8 GB**，至少加 2 GB swap | 每个 opencode 实例是一个 Node 进程；演示机（4 GB、无 swap、3 实例）空载实测约 1.6 GB，余量不大，跑真实任务与扩容前先加 swap |
 | 系统盘 | ≥ 40 GB | 镜像 2.5 GB + 构建缓存 1.3 GB + 数据卷 |
 | 系统 | Ubuntu 22.04 / 24.04 | 演示环境就是 24.04，其他发行版未验证 |
-| 域名 | **已备案**（境内服务器） | 未备案域名走 80/443 会被拦，只能改用高位端口 |
+| 域名 | 使用方现成的域名 | 备案不在本项目范围内。仅提醒：境内服务器上未备案的域名走 80/443 会被拦，那种情况改用高位端口 |
 | 安全组 | 只放行 80、443（加你的 SSH 端口） | 其余一律不放开：gateway 与 opencode 都没有映射端口，不需要 |
 | TLS 证书 | 正式证书 → `certs/fullchain.pem`、`certs/privkey.pem` | `nginx.conf` 强制 TLS，证书缺失时 nginx 直接启动失败 |
 
