@@ -253,8 +253,8 @@ MODEL_BASE_URL=http://mock-model:8000/v1
 MODEL_API_KEY=mock-key-not-used
 ```
 
-如果是从真实模型切回来，重建实例让变量生效：
-`docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3`。
+如果是从真实模型切回来，重建实例让变量生效（见下面「改完 .env 要重建谁」）：
+`docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3`。
 
 `deploy/mock-model/` 是 OpenAI 兼容的假模型，**只用 python 标准库**（构建不装依赖，
 断网也能构建）。它的行为是确定性的，所以可以做自动化断言：
@@ -274,22 +274,48 @@ MODEL_API_KEY=mock-key-not-used
 
 ### 换模型 / 换服务商
 
-以下改动都只需要重建 opencode 实例，网关不用动：
+**模型这件事被切成了两半，分别由网关和 opencode 决定**，所以「改完重建谁」取决于你改的是哪一半：
 
-| 场景 | 要改的地方 |
-|---|---|
-| 只换模型（同一地址） | `.env` 的 `MODEL_NAME` |
-| 换地址 / 换密钥 | `.env` 的 `MODEL_BASE_URL`、`MODEL_API_KEY` |
-| 换 provider id（如改走 `openai`、`zhipuai`） | `.env` 的 `MODEL_PROVIDER` **加** `opencode.json` 里覆写的那个 key，两处必须同名 |
+| 谁决定 | 决定什么 | 读哪些变量 |
+|---|---|---|
+| `gateway` | **问哪个模型**：每个任务下发 `{providerID, modelID}` | `MODEL_PROVIDER`、`MODEL_NAME`、`SUMMARIZER_AGENT` |
+| `opencode` | **问到哪、用什么密钥**：`baseURL` / `apiKey` | `MODEL_BASE_URL`、`MODEL_API_KEY` |
 
-最后一行是最容易踩的坑：`opencode.json` 覆写的是名叫 `deepseek` 的 provider，
-若 `MODEL_PROVIDER` 改成别的 id，配置就必须同步改键名，否则覆写不生效、请求会打到官方地址。
+因此：
 
-环境变量只在容器创建时注入，`restart` 不生效，改完要重建：
+| 场景 | 要改的地方 | 重建谁 |
+|---|---|---|
+| 只换模型（同一地址） | `.env` 的 `MODEL_NAME` | **gateway + opencode** |
+| 换地址 / 换密钥 | `.env` 的 `MODEL_BASE_URL`、`MODEL_API_KEY` | opencode |
+| 换 provider id（如改走 `openai`、`zhipuai`） | `.env` 的 `MODEL_PROVIDER` **加** `opencode.json` 里覆写的那个 key，两处必须同名 | gateway + opencode（改 `opencode.json` 还要 `--build`） |
+
+**「只换 `MODEL_NAME` 时只重建 opencode」是错的**——这是实测确认过的坑，见下。
+`MODEL_PROVIDER` / `MODEL_NAME` 网关自己也读了一份（`gateway/app/core/config.py` 的
+`model_provider` / `model_name`），由 `dispatcher` 在派发时逐个任务下发
+（`gateway/app/services/dispatcher.py` 的 `provider_id=` / `model_id=`）。
+
+> **实测记录**：把 `.env` 的 `MODEL_NAME` 改成 `probe-ctl-X`，只重建三个 opencode 实例后：
+> gateway 容器 **ID 完全没变**（`5589e18208c6`，StartedAt 也没变），进程内
+> `MODEL_NAME` 仍是 `deepseek-v4-flash`，`/internal/status` 的 `config.model_name`
+> 也是旧值；提交任务后 mock-model 收到的请求是 `model=deepseek-v4-flash`。
+> 也就是说：**网关会一直用它启动时那份配置去问模型，改了 `.env` 也照样发旧的 model id。**
+> 配合真实服务商时，症状是「换了模型但账单/行为毫无变化」，而且不报任何错。
+
+另外，`MODEL_PROVIDER` 与 `opencode.json` 的键名必须同名：`opencode.json` 覆写的是名叫
+`deepseek` 的 provider，若 `MODEL_PROVIDER` 改成别的 id，配置就要同步改键名，
+否则覆写不生效、请求会打到官方地址。
+
+环境变量只在容器创建时注入，`restart` 不生效。除非你很确定只动了 opencode 那一半
+（`MODEL_BASE_URL` / `MODEL_API_KEY` / 抓取代理），否则**两边一起重建最省事**：
 
 ```bash
-docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3
+docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3
 ```
+
+> 重建实例后 **前 10~30 秒不要提交任务**：池子的健康检查每 10 秒一轮、连续 3 次失败才
+> 标记不可用，所以这段时间里网关仍会往刚重启、还没 bootstrap 完的实例派活。
+> 实测到的报错是 `创建会话失败 instance=oc-1: All connection attempts failed`，
+> 任务直接 `failed`。先 `docker compose ps` 等六个容器都 healthy 再开始用。
 
 ### 连通性自测
 
@@ -786,6 +812,9 @@ chmod 600 .env        # 里面有 JWT 与实例密码
 - `CORS_ALLOW_ORIGINS` —— 原生 App 留空；H5 / WebView 填来源域名。
 
 `.env` 整份被 `env_file` 注入 gateway 容器，改完必须重建容器才生效（`restart` 不重新读）。
+注意 `.env` 里的变量是**分给两边**的：配额/限流/回调/`JWT` 等只影响 gateway，
+`MODEL_BASE_URL`/`MODEL_API_KEY` 只影响 opencode，而 `MODEL_PROVIDER`/`MODEL_NAME`
+两边都读。重建规则见第 5 节「换模型 / 换服务商」。
 
 ### 15.5 放证书
 
@@ -832,15 +861,28 @@ MODEL_API_KEY=sk-真实密钥
 - `MODEL_NAME` 必须是**该地址真实提供的 id**：写错启动时不报错，第一次调用才失败。
   用 `curl -s -H "Authorization: Bearer $MODEL_API_KEY" "$MODEL_BASE_URL/models"` 查实际有哪些。
 - `MODEL_BASE_URL` 必须 OpenAI 兼容（`GET /models` 列模型、`POST /chat/completions` 对话）。
-- 只换地址 / 密钥 / 模型 → 重建实例即可，**不用重新构建镜像**：
+- 改完 `.env` **重建 gateway 和三个实例**，**不用重新构建镜像**（`MODEL_PROVIDER`/`MODEL_NAME`
+  gateway 自己也读一份，只重建 opencode 会出现「换了模型但仍按旧 model id 发请求」，
+  详见第 5 节实测记录）：
 
 ```bash
-docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3
+docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3
+docker compose ps                                   # 等六个容器都 healthy 再提交任务
 ```
 
-- 换**服务商**（改 `MODEL_PROVIDER` 的取值）才需要动 `opencode/config/opencode.json`
+- 换**服务商**（改 `MODEL_PROVIDER` 的取值）还要动 `opencode/config/opencode.json`
   里覆写的那个 provider 键名（当前是 `deepseek`），两处必须同名，然后
   `docker compose up -d --build opencode-1`。
+- 想确认运行时到底在用哪个模型，不用猜，看网关自己报的：
+
+```bash
+ADMIN_TOKEN=$(grep ^ADMIN_TOKEN= .env | cut -d= -f2-)
+docker compose exec gateway curl -s -H "X-Admin-Token: $ADMIN_TOKEN" \
+  http://127.0.0.1:8080/internal/status | python3 -m json.tool | grep -A3 '"config"'
+```
+
+`config.model_provider` / `config.model_name` 就是网关**此刻**会下发的那两个值。
+它和 `.env` 不一致，就说明网关没重建。
 
 连通性自测——在实例里直接问一句，能回 PONG 说明地址 + 密钥 + 模型 id 三者都对：
 
