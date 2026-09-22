@@ -319,11 +319,49 @@ docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3
 
 ### 连通性自测
 
+分两层查，先确认「模型通不通」，再确认「整条链通不通」。
+
+**第一层：从实例内部直接打模型端点**（不经过网关，能定位问题在模型侧还是链路侧）：
+
 ```bash
-# 实例内直接跑一次，能打印 PONG 说明地址 + 密钥 + 模型 id 三者都对
-docker compose exec opencode-1 \
-  opencode run --model deepseek/deepseek-v4-flash 'Reply with exactly: PONG'
+# 1) 地址通不通、这个地址上有哪些模型
+docker compose exec opencode-1 sh -c \
+  'curl -s -H "Authorization: Bearer $MODEL_API_KEY" "$MODEL_BASE_URL/models"'
+
+# 2) 用你配置的 model id 真的问一句（把 deepseek-chat 换成你的 MODEL_NAME）
+docker compose exec opencode-1 sh -c \
+  'curl -s -X POST "$MODEL_BASE_URL/chat/completions" \
+     -H "Authorization: Bearer $MODEL_API_KEY" -H "Content-Type: application/json" \
+     -d "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: PONG\"}]}"'
 ```
+
+第 2 条能回内容，就说明**地址 + 密钥 + 模型 id 三者都对**。
+
+> **注意**：对着 `mock-model` 跑这两条时，密钥写错也照样返回 200（它不鉴权）。
+> 所以「密钥是否有效」这一项只有接真实服务商才能真正验证——那时密钥错会返回 401。
+
+**第二层：走完整链路提交一个真实任务**（这才是最终判据，覆盖网关 + opencode + 模型）：
+
+```bash
+TOKEN=$(curl -s -X POST https://agent.example.com/api/v1/auth/token \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"zhangsan","password":"强密码"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+curl -s -X POST https://agent.example.com/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: selftest-1' \
+  -d '{"kind":"text","text":"连通性自测","instruction":"一句话总结"}'
+
+# 拿返回的 task_id 查结果：status=succeeded 且 result_md 有内容即通过
+curl -s https://agent.example.com/api/v1/tasks/<task_id> -H "Authorization: Bearer $TOKEN"
+```
+
+> **不要用 `docker compose exec opencode-1 opencode run --model ... '...'` 做自测**：
+> 实测这个命令在非 TTY（脚本、ssh、CI）下会**挂住不返回**——`timeout` 到点被杀，
+> 退出码 124、一行输出都没有；而 opencode 自己的日志显示模型调用其实成功了
+> （`message=stream ... llm runtime selected`）。请求确实到了模型端，是 CLI 不吐结果，
+> 拿它判断「模型配错了」会直接误判。上面第一层的 curl 是等价且可靠的替代。
 
 密钥统一走环境变量，不要用容器内 `opencode auth login`：配置里已显式指定 `apiKey`，会盖掉登录凭据。
 
@@ -884,12 +922,8 @@ docker compose exec gateway curl -s -H "X-Admin-Token: $ADMIN_TOKEN" \
 `config.model_provider` / `config.model_name` 就是网关**此刻**会下发的那两个值。
 它和 `.env` 不一致，就说明网关没重建。
 
-连通性自测——在实例里直接问一句，能回 PONG 说明地址 + 密钥 + 模型 id 三者都对：
-
-```bash
-docker compose exec opencode-1 \
-  opencode run --model deepseek/deepseek-chat 'Reply with exactly: PONG'
-```
+连通性自测按第 5 节的两层做法：先从实例内直接 curl 模型端点（验证地址 + 密钥 +
+模型 id），再走完整链路提交一个真实任务。
 
 然后跑一个真实任务，并**按第 5 节「模拟覆盖不到的东西」那张表逐项确认**：
 tokens/cost、超时回收、抓取失败、多轮工具调用在模拟下都证明不了。
@@ -935,3 +969,52 @@ docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users
 - 证书续期：第 9 节；备份与恢复：第 10 节
 - 定期 `./ops.sh backup`，并把 `backup/` 复制到**另一台机器**——
   备份和业务数据放在同一台机器上不算备份
+
+## 16. 改动速查：改什么用什么命令
+
+**先记住一个前提**：环境变量只在**容器创建时**注入，`docker compose restart`
+读不到新值。所以下表里凡涉及 `.env` 或 `compose` 的改动，一律用
+`--force-recreate`（`restart` 只对「进程自己崩了」有用，而那种情况
+`restart: unless-stopped` 已经自动处理了）。所有命令都在 `deploy/` 目录下执行。
+
+| 你要改的东西 | 命令 | 备注 |
+|---|---|---|
+| 配额、限流、超时、回调等网关参数 | 改 `.env` → `./ops.sh restart gateway` | ops.sh 的 `restart` 就是 `--force-recreate` |
+| 模型 id / provider | 改 `.env` 的 `MODEL_NAME`/`MODEL_PROVIDER` → `docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3` | **必须带上 gateway**，见第 5 节实测记录 |
+| 模型地址 / 密钥 | 改 `.env` 的 `MODEL_BASE_URL`/`MODEL_API_KEY` → `docker compose up -d --force-recreate opencode-1 opencode-2 opencode-3` | 只有 opencode 读这两个 |
+| 实例密码 | 改 `.env` 的 `OC*_PASSWORD` → `docker compose up -d --force-recreate gateway opencode-1 opencode-2 opencode-3` | 网关名册里也带着同一份密码 |
+| nginx 配置（限流、超时、路由） | 改 `nginx.conf` → `docker compose up -d --force-recreate nginx` | 单文件 bind mount，`restart`/`reload` 都看不到新内容 |
+| agent 权限、`agents/*.md`、`opencode.json` | 改文件 → `docker compose up -d --build opencode-1` | 这些**构建进镜像**，`--force-recreate` 不够 |
+| opencode 版本 | 改 `opencode/Dockerfile` 的 `ARG OPENCODE_VERSION` → `docker compose up -d --build opencode-1` | 同上 |
+| gateway 代码 | 改 `gateway/app/**` → `docker compose up -d --build gateway` | |
+| 实例数量 | 改 `docker-compose.yml` 四处（第 8 节）→ `docker compose up -d` | 不用 `--build`，新实例复用现成镜像 |
+| 证书 | 覆盖 `certs/*.pem` → `docker compose exec nginx nginx -s reload` | 证书是 bind mount，`reload` 就够（与 `nginx.conf` 不同） |
+
+**常用开关与查看**：
+
+```bash
+./ops.sh status                       # 先看这个：容器 + 对外健康 + 网关自检
+./ops.sh instances                    # 每个实例忙不忙、失败几次、挂了几个会话
+./ops.sh logs gateway -f              # 跟日志；ops.sh logs <服务名> 可换 nginx/opencode-1
+./ops.sh user zhangsan                # 单用户：配额用量、任务分布、实例绑定
+./ops.sh heal                         # 只重建不健康的容器
+./ops.sh backup                       # 备份两个数据卷
+
+docker compose ps                     # 容器状态
+docker compose stop opencode-3        # 临时下线一个实例（约 30s 后网关标记不可用并停止派活）
+docker compose start opencode-3       # 恢复（实测约 5s 内回到 idle）
+./ops.sh shell gateway                # 进容器
+```
+
+**改完一定要验**（这三条覆盖了绝大多数「改完没生效」的情况）：
+
+```bash
+docker compose ps                      # 1) 六个容器都 healthy 再继续
+curl -s https://你的域名/api/v1/health  # 2) engine: ready，pool_total 等于实例数
+ADMIN_TOKEN=$(grep ^ADMIN_TOKEN= .env | cut -d= -f2-)
+docker compose exec gateway curl -s -H "X-Admin-Token: $ADMIN_TOKEN" \
+  http://127.0.0.1:8080/internal/status | python3 -m json.tool   # 3) config 段 = 网关当前生效的配置
+```
+
+重建实例后**前 10~30 秒别提交任务**：池子的健康检查每 10 秒一轮、连续 3 次失败才
+标记不可用，这段时间网关仍会往还没 bootstrap 完的实例派活，实测会让任务直接 `failed`。
