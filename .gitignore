@@ -1,5 +1,9 @@
 # 部署时的本地数据与密钥
 deploy/.env
+# .env 的备份副本同样含密钥。只写 `deploy/.env` 是不够的：
+# ops.sh / 手工 cp 产生的 .env.bak.* 不会被上一条匹配，`git add -A` 就会把密钥提交上去。
+deploy/.env.*
+deploy/.env.bak*
 deploy/certs/
 deploy/data/
 

@@ -605,3 +605,24 @@ openssl rand -hex 32
 
 密钥为空时 `/auth/exchange` 直接 403，这是**预期行为**（模式 B 默认关闭），
 不是故障。签名算法与注意事项见 `docs/API.md` 第 2.2 节。
+
+### 宿主机重启后自动恢复
+
+容器本身有 `restart: unless-stopped`，虚拟机内 `docker.service` 也是 enabled，
+所以**只要虚拟机起来了，六个容器会自己回来**。
+
+缺的一环是虚拟机本身：VirtualBox 的 autostart 需要 `VBoxAutostartSvc` 服务，
+它默认不装，安装需要管理员权限。当前用的是**登录触发的计划任务**（不需要管理员）：
+
+```powershell
+Get-ScheduledTask -TaskName 'QinAN demo VM (headless)' |
+  Select-Object TaskName, State
+Start-ScheduledTask -TaskName 'QinAN demo VM (headless)'   # 手动拉起来
+```
+
+实测：计划任务触发 → 26 秒 SSH 可用 → 47 秒网关 `health` 返回 `ok`。
+
+> **注意这个方案的边界**：登录触发只在**有人登录之后**才生效。宿主机无人值守重启后
+> 虚拟机不会自己起来。要做到真正与登录无关，必须以管理员身份装
+> `VBoxAutostartSvc` 并配 `autostart.cfg`（或把计划任务改成「计算机启动时」+ 以
+> SYSTEM 运行）。这是当前唯一需要管理员权限才能补的运维项。
