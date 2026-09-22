@@ -12,7 +12,9 @@ name: agent-gateway
 # 注意：opencode 的配置（opencode.json、agents/*.md）在构建期由
 # opencode/Dockerfile 打进镜像，这里不再 bind mount 配置目录。
 # 只读挂载会让 opencode 启动写 .gitignore 时 EROFS，实例 bootstrap 失败。
-# 改配置后需要 rebuild 才能生效：docker compose up -d --build opencode-1
+# 改配置后需要 rebuild 才能生效，而且**不能点名**：三个实例共用一个镜像 tag，
+# `--build opencode-1` 只会重建 oc-1，另两个留在旧镜像上（已实测）。
+# 正确写法：docker compose up -d --build
 
 x-opencode-base: &opencode-base
   image: agent-opencode:local
@@ -22,7 +24,8 @@ x-opencode-base: &opencode-base
 
 # 模型接入：opencode 启动时从这两个变量读服务地址与密钥。
 # 用 YAML 合并键 << 注入到各实例的 environment 内，避免三份重复。
-# MODEL_BASE_URL 留空时回退到 provider 官方地址。
+# MODEL_BASE_URL 留空 = 不指定地址，回退到 provider 自己的默认值（这条路径未实测，
+# 上线请显式填地址）。
 x-opencode-model-env: &opencode-model-env
   MODEL_BASE_URL: ${MODEL_BASE_URL:-}
   MODEL_API_KEY: ${MODEL_API_KEY:-}

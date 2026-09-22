@@ -8,7 +8,9 @@
 - 编码：UTF-8；请求与响应均为 `application/json`，流式接口除外
 - 鉴权：`Authorization: Bearer <access_token>`
 - 时间：ISO 8601 带时区，例如 `2026-09-21T14:03:11+08:00`
-- 幂等：`POST /tasks` 必须带 `Idempotency-Key`（建议 UUID），24 小时内同 Key 返回同一任务
+- 幂等：`POST /tasks` 应带 `Idempotency-Key`（建议 UUID）。同一用户用同一个 Key 重复提交，
+  服务端直接返回**第一次建的那个任务**（不设时间窗，也不看它当前是什么状态）；
+  不带这个头则不去重，会重复建任务
 - 追踪：响应头 `X-Request-Id`，报障时请提供
 - 版本：路径带 `/v1`，破坏性变更会升 `/v2`，`/v1` 至少并行维护 6 个月
 
@@ -36,6 +38,8 @@
 
 `access_token` 有效期 12 小时，`refresh_token` 30 天。
 
+字段上限：`username` ≤ 64、`password` ≤ 256、`device_id` ≤ 128 字符，超限返回 `400 INVALID_INPUT`。
+
 ### 2.2 模式 B：App 侧可信直传（推荐给已有用户体系的 App）
 
 App 后端用双方约定的共享密钥签名，无需用户二次登录。
@@ -54,6 +58,7 @@ App 后端用双方约定的共享密钥签名，无需用户二次登录。
 - `timestamp` 为 Unix 秒，与服务端时差超过 **300 秒**直接拒绝，防重放
 - 首次调用会自动开户（`daily_quota` 取默认值），用户信息随后可人工调整
 - 响应与 2.1 相同，但返回的 `user.id` 为服务端内部 ID，请以它为准
+- 字段上限：`external_user_id` ≤ 128、`display_name` ≤ 64 字符，`signature` 为 16~128 字符
 
 签名算法（`signature` 用十六进制小写，服务端比较前会转小写，所以大写也接受）：
 
@@ -83,8 +88,10 @@ signature = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdiges
 
 ### 2.3 刷新与登出
 
-- `POST /auth/refresh`，body `{ "refresh_token": "rt_..." }` → 返回新的 `access_token`
-- `POST /auth/logout` → `204`，使当前 refresh_token 失效
+- `POST /auth/refresh`，body `{ "refresh_token": "rt_..." }` → 返回新的 `access_token`。
+  只换发 `access_token`，`refresh_token` **不轮换**，一直有效到被 logout 吊销或账号被停用
+- `POST /auth/logout` → `204`，吊销当前登录会话（该会话的 `access_token` 与 `refresh_token`
+  同时失效）。要带 `Authorization: Bearer <access_token>`，不需要 body
 
 ## 3. 当前用户
 
@@ -125,10 +132,10 @@ signature = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdiges
 | `kind` | string | 是 | `url` 或 `text` |
 | `url` | string | `kind=url` 必填 | 必须 `http(s)://`，长度 ≤ 2048 |
 | `text` | string | `kind=text` 必填 | 长度 ≤ 200000 字符 |
-| `instruction` | string | 否 | 自定义要求，缺省为"提炼要点并输出 Markdown" |
-| `max_output_chars` | int | 否 | 输出上限，默认 1200，最大 4000 |
+| `instruction` | string | 否 | 自定义要求，缺省为"提炼要点并输出 Markdown"，长度 ≤ 4000 |
+| `max_output_chars` | int | 否 | 输出上限，取值 100~4000，默认 1200 |
 | `callback_url` | string | 否 | 终态回调地址，必须 HTTPS 且在服务端白名单内 |
-| `client_task_id` | string | 否 | 你们侧的任务 ID，原样回传，便于对账 |
+| `client_task_id` | string | 否 | 你们侧的任务 ID，原样回传，便于对账，长度 ≤ 64 |
 
 `201`
 
@@ -143,8 +150,14 @@ signature = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdiges
 ```
 
 - `queue_pos` 从 1 开始；已开始执行时为 `0`
-- 同一用户同时只允许 1 个任务处于 `queued`/`running` 状态，超出发 `429 QUEUE_FULL`
 - 每日配额用尽发 `429 QUOTA_EXCEEDED`
+- 两个**独立**的闸门，各自超限都返回 `429 QUEUE_FULL`，区别在 `error.message` 和 `retry_after`：
+  - **在飞闸门**：`running` + `streaming` 的任务达到 `MAX_IN_FLIGHT_PER_USER`（默认 1）→
+    "你当前已有 N 个任务在处理中"，`retry_after: 30`
+  - **排队闸门**：`queued` 的任务达到 `MAX_QUEUE_DEPTH_PER_USER`（默认 3）→
+    "你的待处理队列已满"，`retry_after: 60`
+
+  也就是说默认配置下最多「1 个在飞 + 3 个排队」，第 5 个才会被拒。
 
 ## 5. 查询任务
 
@@ -217,12 +230,23 @@ signature = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdiges
 
 ```json
 {
-  "items": [ { "task_id": "tsk_9f3a1c", "status": "succeeded", "created_at": "...", "summary_head": "前 100 字预览" } ],
+  "items": [
+    {
+      "task_id": "tsk_9f3a1c",
+      "status": "succeeded",
+      "kind": "url",
+      "created_at": "2026-09-21T14:03:11+08:00",
+      "summary_head": "前 100 字预览"
+    }
+  ],
   "next_cursor": "eyJvZmZzZXQiOjIwfQ=="
 }
 ```
 
-- `limit` 默认 20，最大 50；`next_cursor` 为 `null` 表示没有更多
+- `limit` 默认 20，最大 50；`next_cursor` 为 `null` 表示没有更多，否则原样传回 `cursor` 取下一页
+- `status` 可选，取值见 5.1 的状态表（如 `succeeded`）；不传则返回全部状态
+- `summary_head` 是 `result_md` 的前 100 字，没有结果时为 `null`
+- 留存期口径与 `GET /tasks/{id}` 一致：过了留存期的终态任务在两边都看不到
 - **只返回当前用户自己的任务**
 
 ### 5.3 取消
@@ -237,19 +261,37 @@ signature = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdiges
 
 `GET /tasks/{task_id}/events`，`Accept: text/event-stream`
 
+鉴权同其他接口（`Authorization: Bearer <access_token>`）；浏览器 `EventSource` 这类
+不能自定义 Header 的客户端，可以改用 `?token=<access_token>`（SSE 与 WebSocket 都支持）。
+
 ```
+id: 1
 event: status
-data: {"status":"running"}
+data: {"type":"status","status":"running"}
 
+id: 2
 event: delta
-data: {"text":"# 摘要\n"}
+data: {"type":"delta","text":"# 摘要\n"}
 
+id: 3
 event: delta
-data: {"text":"- 要点一\n"}
+data: {"type":"delta","text":"- 要点一\n"}
 
+id: 4
 event: done
-data: {"status":"succeeded","usage":{"tokens_out":812}}
+data: {"type":"done","status":"succeeded"}
 ```
+
+事件类型只有四种：`status`、`delta`、`done`、`error`。
+
+- `id` 是事件序号（`seq`），与 `Last-Event-ID` 配合用于断线补发（见 6.3）
+- `data` 里同时带 `type` 字段，取值与 `event:` 行相同。`event:` 行是给浏览器 `EventSource`
+  用的；自研客户端直接读 `data.type` 即可
+- `done` 只带 `status`，**不带用量**；`usage` 请用 `GET /tasks/{id}` 取
+- `error` 带 `{"status":"failed","error":{"code":"...","message":"..."}}`
+- 没有事件推送时，服务端发**注释帧** `: ping`（每 `SSE_PING_INTERVAL_SECONDS` 秒一次，默认 15s）。
+  它没有 `event:` / `data:`，按 SSE 规范应被忽略
+- 收到 `done` 或 `error` 后服务端会关闭连接，客户端不必主动断开
 
 ### 6.2 WebSocket
 
@@ -262,12 +304,18 @@ data: {"status":"succeeded","usage":{"tokens_out":812}}
 ```
 
 - WebSocket 需带 `token` 查询参数（部分客户端无法设置 Header）
-- 服务端每 20 秒发 `{ "type": "ping" }`，客户端应回 `{ "type": "pong" }`
+- 连接建立后**总是先按 `seq` 重放该任务的完整事件流**，再转入实时推送
+- 服务端每 15 秒（与 SSE 心跳同一个值 `SSE_PING_INTERVAL_SECONDS`）发 `{ "type": "ping" }`，
+  客户端可以回 `{ "type": "pong" }`（服务端不校验，也不依赖它保活）
 
 ### 6.3 重连补发
 
-- SSE 支持 `Last-Event-ID`，WebSocket 支持 `{ "type": "attach", "last_seq": 128 }`
-- 补发完成后转入实时推送；断线期间产生的增量片段不会丢失
+- **SSE**：重连时带上 `Last-Event-ID: <最后收到的 id>`，或用 `?last_seq=<n>` 查询参数，
+  服务端只补发 `seq > n` 的事件；补发完成后转入实时推送，断线期间产生的增量片段不会丢失
+- **WebSocket**：每次连接都**从 seq 0 重放完整历史**，然后转实时推送。客户端不需要、也不要发
+  attach 帧（发了会被忽略）。因此重连后**必须按 `seq` 去重**，已渲染过的增量不要再拼一遍
+
+  想「只补增量」就用 SSE 的 `Last-Event-ID`；WebSocket 的取舍是简单，代价是重连会重收全量。
 
 ### 6.4 兜底建议
 
@@ -289,12 +337,15 @@ Content-Type: application/json
   "client_task_id": "a1b2c3",
   "status": "succeeded",
   "result_md": "# 摘要\n...",
+  "error": null,
   "finished_at": "2026-09-21T14:04:20+08:00"
 }
 ```
 
 - 请用原始请求体校验签名，并返回 `2xx`
-- 非 `2xx` 或超时（5s）将重试 3 次（间隔 5s / 30s / 120s）
+- 非 `2xx` 或超时（默认 5s）会重试，**总共尝试 `CALLBACK_MAX_ATTEMPTS`（默认 3）次**，
+  间隔取自 `CALLBACK_RETRY_DELAYS`（默认 5s / 30s / 120s）
+- 任务失败时 `error` 是 `{"code":"...","message":"..."}`，成功时为 `null`
 - 回调失败不影响任务本身状态，可随时用 `GET /tasks/{id}` 补拉
 
 ## 8. 错误格式
@@ -313,14 +364,13 @@ Content-Type: application/json
 
 | HTTP | code | 含义 |
 |---|---|---|
-| 400 | `INVALID_INPUT` | 参数不合法（含 URL 格式、文本超长） |
-| 401 | `UNAUTHORIZED` | Token 缺失/过期/吊销 |
-| 403 | `FORBIDDEN` | 无权访问该任务（非本人） |
+| 400 | `INVALID_INPUT` | 参数不合法（含 URL 格式、文本/字段超长、cursor 不合法） |
+| 401 | `UNAUTHORIZED` | Token 缺失/过期/已吊销/账号被禁用；**登录失败（用户名或密码错误）也是 401** |
+| 403 | `FORBIDDEN` | 无权访问该任务（非本人）；或模式 B 未启用时的 `/auth/exchange` |
 | 404 | `NOT_FOUND` | 任务不存在或已过 30 天留存期 |
 | 409 | `TASK_NOT_CANCELABLE` | 任务已终态，无法取消 |
 | 429 | `QUOTA_EXCEEDED` | 当日配额用尽 |
-| 429 | `QUEUE_FULL` | 个人队列已满（正在处理 ≥ 1 个） |
-| 429 | `RATE_LIMITED` | 请求过于频繁，看 `Retry-After` |
+| 429 | `QUEUE_FULL` | 在飞任务已达上限（默认 1）或个人队列已满（默认 3），看 `error.message` 区分 |
 | 502 | `UPSTREAM_ERROR` | 智能体后端异常，可重试 |
 | 504 | `TIMEOUT` | 执行超时 |
 
@@ -334,9 +384,11 @@ Content-Type: application/json
 
 429 有两种来源，App 要分开处理：
 
-- **网关返回的 429**（`QUOTA_EXCEEDED` / `QUEUE_FULL` / `RATE_LIMITED`）：标准 JSON 错误体，
+- **网关返回的 429**（只有 `QUOTA_EXCEEDED` 和 `QUEUE_FULL`）：标准 JSON 错误体，
   带 `Retry-After`。按 `code` 给用户不同文案即可。
-- **nginx 返回的 429**（请求频率超过 `limit_req`）：body 是 nginx 的 HTML 错误页，
+  网关侧**没有**限流逻辑，也没有 `RATE_LIMITED` 这个 code，别照着写分支。
+- **nginx 返回的 429**（请求频率超过 `limit_req`，例如同一 token 每分钟超过 120 次）：
+  body 是 nginx 的 HTML 错误页，
   **没有** `Retry-After`。App 见到非 JSON 的 429 应按固定间隔退避重试，不要当业务错误展示。
 
 不提供 `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`（未实现）。
@@ -351,11 +403,16 @@ Content-Type: application/json
 
 `engine` 为 `ready` / `degraded` / `down`，可用于 App 侧降级提示。
 
+- `ready`：至少有一个空闲实例；`degraded`：实例都活着但都在忙；`down`：没有可用实例
+- `status` 为 `ok` / `degraded`，后者表示网关自己连不上数据库（此时不要提交任务）
+- 这个接口不查模型是否可用：`engine: ready` 时模型仍可能是坏的
+
 ## 10. 联调环境
 
 - 沙箱：`https://{host}/api/v1`，开启 `MOCK_MODE` 后所有状态流转、错误码与生产一致，延迟约 3~8 秒，`result_md` 为固定样例文本
 - 沙箱账号与正式账号隔离，配额独立
-- 可用 `GET /openapi.json` 生成各语言 SDK
+- 可用 `GET /openapi.json` 生成各语言 SDK。线上只放行这一个路径；
+  FastAPI 自带的 `/docs`、`/redoc` 没有对外暴露（本地起服务时才看得到）
 
 ## 11. 联调清单
 

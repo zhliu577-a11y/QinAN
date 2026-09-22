@@ -77,4 +77,3 @@ $env:PYTHONIOENCODING='utf-8'; .\.venv\Scripts\python.exe -m pytest gateway/test
 ```
 
 测试用 `MOCK_MODE`，不需要 opencode、不需要模型凭据、不产生费用。
-OpenCodeNginx

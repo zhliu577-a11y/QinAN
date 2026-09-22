@@ -209,9 +209,12 @@ docker compose exec opencode-1 \
 ```
 MODEL_PROVIDER=deepseek                  # provider id（models.dev 清单里的）
 MODEL_NAME=deepseek-v4-flash             # model id
-MODEL_BASE_URL=https://api.deepseek.com/v1   # 服务地址；留空则回退 provider 官方地址
+MODEL_BASE_URL=https://api.deepseek.com/v1   # 服务地址；上线请显式填写
 MODEL_API_KEY=sk-xxxxxxxx                # 该地址签发的密钥
 ```
+
+`MODEL_BASE_URL` 留空表示「不指定地址」，此时用的是哪个地址取决于 opencode 对该 provider
+的默认值——**这条路径本项目没有实测过**，所以别依赖它，换服务商就把地址显式写全。
 
 `MODEL_BASE_URL` 必须兼容 OpenAI 协议：`GET /v1/models` 列模型、
 `POST /v1/chat/completions` 对话（支持 `stream: true`）。自建网关与服务商官方地址都行。
@@ -419,6 +422,7 @@ curl -s https://agent.example.com/api/v1/tasks/<task_id> -H "Authorization: Bear
 网络里，镜像内自带 `curl`）：
 
 ```bash
+ADMIN_TOKEN=$(grep ^ADMIN_TOKEN= .env | cut -d= -f2-)
 docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users \
   -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"username":"zhangsan","password":"换成强密码","display_name":"张三","daily_quota":30}'
@@ -542,7 +546,7 @@ ls -lh backup/
 ```bash
 docker compose ps                             # 状态与健康
 docker compose logs -f gateway                # 网关日志（stdout 是权威副本）
-docker compose up -d --force-recreate gateway # 改完 .env 后重建网关
+docker compose up -d                          # 改完 .env 后落地（不点名，见第 16 节）
 docker compose down                           # 停止（保留数据）
 docker compose up -d --build                  # 重新构建并启动
 ```
@@ -551,7 +555,9 @@ docker compose up -d --build                  # 重新构建并启动
 
 - 改 `nginx.conf` 后**不能用 `restart`**：它是单文件 bind mount，`restart` 只会重载
   容器创建时那个 inode，看不到新内容。必须 `--force-recreate nginx`。
-- 改 `.env` 后也要 `--force-recreate`，`restart` 不会重新读取。
+- 改 `.env` 后**不能只用 `restart`**（环境变量在容器创建时就固定了），但也不要点名
+  `--force-recreate`——直接跑不点名的 `docker compose up -d`，让 compose 自己算出该重建谁
+  （原因见第 5 节与第 16 节）。
 
 ## 12. 国内网络注意
 
@@ -571,7 +577,9 @@ docker compose up -d --build                  # 重新构建并启动
 
 ## 13. 容量实测（3 实例 / 4 vCPU 虚拟机）
 
-20 个用户同时提交、真实模型（非 MOCK）实测：
+20 个用户同时提交、走**完整链路**（`MOCK_MODE=false`：网关 → opencode → 内置模拟模型）实测。
+模型换成了真实的之后，单任务耗时会明显变长，所以下面这些数字反映的是**网关与调度器的
+上限**，不是真实业务吞吐：
 
 | 指标 | 实测值 |
 |---|---|
@@ -610,15 +618,16 @@ docker compose up -d --build                  # 重新构建并启动
   要么同步调大 `rl_submit`。
 - **重新登录 / 换 Token 会拿到一个新桶**，等于把自己的额度重置。这条路径需要凭据
   才能走，所以重置次数被「能拿到多少凭据」限住，不构成绕过。
-- **别拿本机压测的 429 比例推断线上行为。** 实测：外部客户端的来源 IP 是保留的
-  （宿主机 curl 经 `127.0.0.1:8443` 进来，`access.log` 记到 `10.0.2.2`），
-  但从本机经发布端口发起的请求会被 docker-proxy/DNAT 折叠成网桥网关 `172.31.1.1`，
-  所有本机流量共用一个桶。在 VM 里自测高并发时，看到的是被折叠后的结果。
+- **别拿本机压测的 429 比例推断线上行为。** 实测：从外部客户端进来的请求，来源 IP 是保留的
+  （`access.log` 记到真实地址），但从**本机**经发布端口（80/443）发起的请求会被
+  docker-proxy / DNAT 折叠成网桥网关 `172.31.1.1`，所有本机流量共用一个 IP 桶。
+  所以只在 VM 内自测高并发时，IP 那一维看到的是被折叠后的结果（按 token 分桶的那一维不受影响）。
 
 **429 有两种来源，App 必须分开处理：**
 
-- 网关返回的 429：JSON body `{"error":{"code":"QUOTA_EXCEEDED"|"QUEUE_FULL"|"RATE_LIMITED",...}}`，
-  带 `Retry-After`，可以按 `code` 给用户不同文案。**没有** `X-RateLimit-*` 头。
+- 网关返回的 429：JSON body `{"error":{"code":"QUOTA_EXCEEDED"|"QUEUE_FULL",...}}`，
+  带 `Retry-After`，可以按 `code` 给用户不同文案。**没有** `X-RateLimit-*` 头，
+  也**没有** `RATE_LIMITED` 这个 code（限流全在 nginx 层）。
 - nginx 返回的 429：body 是 nginx 的 HTML 错误页，**没有** `Retry-After`。
   见到这种就只能按固定间隔退避重试，不要拿它当业务错误展示。
 
@@ -654,6 +663,9 @@ SSE 有自己的 `rl_sse`（60r/m burst 20）桶，不会被查询流量挤占�
 ./ops.sh heal                    # 只重建不健康的容器
 ./ops.sh backup                  # 备份数据卷
 ./ops.sh help                    # 全部命令
+
+# 不在服务器本机跑时，用 QINAN_ENTRY 指定对外入口（默认 https://127.0.0.1）
+QINAN_ENTRY=https://agent.example.com ./ops.sh status
 ```
 
 ### 设计：为什么重启和别人的日志不在接口里
@@ -671,7 +683,7 @@ docker socket —— 挂上 socket 等价于把宿主机 root 交出去（可以
 |---|---|
 | `GET /internal/status` | 一屏自检：`checks` 里每项带 `ok` 与 `detail`，`status` 是总判定；另含 `uptime_seconds`、池子、队列、关键配置 |
 | `GET /internal/instances` | 逐个 opencode 进程：`status` / `current_task_id` / `busy_seconds` / `failures` / `sessions` |
-| `GET /internal/logs` | 网关进程近期日志（环形缓冲，默认 2000 条，重启清空） |
+| `GET /internal/logs` | 网关进程近期日志（环形缓冲容量 2000 条，接口默认返回最近 200 条，重启清空） |
 | `GET /internal/metrics` | 池与队列的聚合数字 |
 | `GET /internal/users` | 用户列表 |
 | `GET /internal/users/{id}` | 单用户详情：配额用量、任务分布、近 10 条任务、登录设备、实例绑定 |
@@ -726,7 +738,7 @@ App 侧已有用户体系时走这条路：App 后端用共享密钥签名换 To
 openssl rand -hex 32
 
 # 2) 填进 deploy/.env 的 EXCHANGE_HMAC_SECRET，然后重建
-./ops.sh restart gateway
+./ops.sh apply
 
 # 3) 自检：密钥没配会返回 403「未启用 App 侧可信直传」；
 #    配了但签名不对会返回 401「签名校验失败」
@@ -766,7 +778,7 @@ Start-ScheduledTask -TaskName 'QinAN demo VM (headless)'   # 手动拉起来
 
 | 项 | 建议 | 说明 |
 |---|---|---|
-| 服务器 | 4 vCPU / 4 GB 起步，**推荐 8 GB**，至少加 2 GB swap | 每个 opencode 实例是一个 Node 进程；4 GB 跑 3 个实例没有 swap 会吃紧 |
+| 服务器 | 4 vCPU / 4 GB 起步，**推荐 8 GB**，至少加 2 GB swap | 每个 opencode 实例是一个 Node 进程；演示机（4 GB、无 swap、3 实例）空载实测约 1.6 GB，余量不大，跑真实任务与扩容前先加 swap |
 | 系统盘 | ≥ 40 GB | 镜像 2.5 GB + 构建缓存 1.3 GB + 数据卷 |
 | 系统 | Ubuntu 22.04 / 24.04 | 演示环境就是 24.04，其他发行版未验证 |
 | 域名 | **已备案**（境内服务器） | 未备案域名走 80/443 会被拦，只能改用高位端口 |
@@ -841,10 +853,10 @@ docker compose up -d                         # 注意：不带 --build
 方式 B 里新机器**不执行任何 `git clone`**（它上不了外网），代码是从那台能上网的
 机器上拷过去的。几点都实测过：
 
-- **带什么过去**：四个镜像共 361 MB（save 成单个 tar 是 321 MB），
-  加上代码（整个仓库 840 KB / 58 个文件）。一个 U 盘装得下。
-- **tar 不用再 gzip**：Docker 的层本身就是压缩的，实测 321 MB → gzip 后 319 MB，
-  白费一次压缩时间。
+- **带什么过去**：`docker save` 出那四个镜像，实测 tar 是 **321 MB**（336,429,056 字节），
+  加上代码——不含 `.git` 的工作目录约 400 KB / 60 个文件。一个 U 盘装得下。
+- **tar 不用再 gzip**：Docker 的层本身就是压缩的，实测 321 MB（320.8 MiB）→ `gzip -6`
+  之后 333,564,451 字节（318.1 MiB），只省 1%，白费一次压缩时间。
 - **只拷 `deploy/` 目录也够**。`build:` 的 context 目录不存在并不影响启动——
   我在缺 context 的情况下实跑了一次 `docker compose up -d`，compose 发现镜像
   已存在就直接用了，根本不去碰那个目录。但还是建议把整个仓库拷过去：多 3 MB，
@@ -944,7 +956,7 @@ docker compose ps           # 等六个容器都 healthy 再提交任务
 
 - 换**服务商**（改 `MODEL_PROVIDER` 的取值）还要动 `opencode/config/opencode.json`
   里覆写的那个 provider 键名（当前是 `deepseek`），两处必须同名，然后
-  `docker compose up -d --build opencode-1`。
+  `docker compose up -d --build`（**不点名**，见下面第 16 节：点名只更新一个实例）。
 - 想确认运行时到底在用哪个模型，不用猜，看网关自己报的：
 
 ```bash
@@ -1020,8 +1032,8 @@ docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users
 |---|---|---|
 | **任何 `.env` 改动**（配额、模型、密码、密钥…） | 改 `.env` → `./ops.sh apply`（等价于不点名的 `docker compose up -d`） | 一律同一条命令，不用记「谁该重建」 |
 | nginx 配置（限流、超时、路由） | 改 `nginx.conf` → `docker compose up -d --force-recreate nginx` | 单文件 bind mount，内容变化 compose **检测不到**，必须强制重建 |
-| agent 权限、`agents/*.md`、`opencode.json` | 改文件 → `docker compose up -d --build opencode-1` | 这些**构建进镜像**，`--force-recreate` 不够 |
-| opencode 版本 | 改 `opencode/Dockerfile` 的 `ARG OPENCODE_VERSION` → `docker compose up -d --build opencode-1` | 同上 |
+| agent 权限、`agents/*.md`、`opencode.json` | 改文件 → `docker compose up -d --build` | 这些**构建进镜像**，`--force-recreate` 不够；三个实例共用一个镜像 tag，**点名只更新点到的那一个**（见下） |
+| opencode 版本 | 改 `opencode/Dockerfile` 的 `ARG OPENCODE_VERSION` → `docker compose up -d --build` | 同上 |
 | gateway 代码 | 改 `gateway/app/**` → `docker compose up -d --build gateway` | |
 | 实例数量 | 改 `docker-compose.yml` 四处（第 8 节）→ `docker compose up -d` | 不用 `--build`，新实例复用现成镜像 |
 | 证书 | 覆盖 `certs/*.pem` → `docker compose exec nginx nginx -s reload` | 证书是 bind mount，`reload` 就够（与 `nginx.conf` 不同） |
@@ -1030,6 +1042,16 @@ docker compose exec gateway curl -s -X POST http://127.0.0.1:8080/internal/users
 一句话版本：**`.env` 改动 → `./ops.sh apply`；镜像里的东西（代码、`opencode.json`、
 agent 定义、opencode 版本）→ `--build`；`nginx.conf` → `--force-recreate nginx`；
 证书 → `reload`。**
+
+> **实测记录：三个实例共用一个镜像 tag 时，点名 `--build` 只更新一个实例。**
+> 往 `opencode/config/agents/summarizer.md` 末尾加一个空行迫使镜像重建，然后跑
+> `docker compose up -d --build opencode-1`：镜像 ID 从 `56e234d4…` 变成 `d002b414…`，
+> 但只有 oc-1 换到了新镜像（StartedAt 跟着变）；**oc-2 / oc-3 仍挂在旧镜像 ID 上，
+> `docker compose ps` 里照样是 healthy**。接着跑一次不点名的 `docker compose up -d`，
+> 它们才被重建到新镜像。所以改配置、改 agent 定义、升版本，一律用**不点名**的
+> `docker compose up -d --build`（这次实测里它就是正确动作）。
+> 只按容器健康状态判断「三实例配置一致」是不可靠的，要比镜像 ID：
+> `docker inspect -f '{{.Image}}' agent-opencode-1 agent-opencode-2 agent-opencode-3`。
 
 **常用开关与查看**：
 

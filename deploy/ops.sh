@@ -20,6 +20,9 @@ fi
 # ADMIN_TOKEN 只用于内部接口；不打印、不落日志
 ADMIN_TOKEN="$(grep -E '^ADMIN_TOKEN=' "$ENV_FILE" | head -n1 | cut -d= -f2-)"
 BASE_INTERNAL="http://127.0.0.1:8080"
+# 对外入口。默认是本机（ops.sh 跑在服务器上）；要在别处跑就覆盖它：
+#   QINAN_ENTRY=https://agent.example.com ./ops.sh status
+ENTRY="${QINAN_ENTRY:-https://127.0.0.1}"
 
 die() { echo "错误: $*" >&2; exit 1; }
 
@@ -47,7 +50,7 @@ api() {
 wait_healthy() {
   local timeout="${1:-60}" waited=0
   while [ "$waited" -lt "$timeout" ]; do
-    if curl -sk -m 5 https://127.0.0.1/api/v1/health 2>/dev/null | grep -q '"status":"ok"'; then
+    if curl -sk -m 5 "${ENTRY}/api/v1/health" 2>/dev/null | grep -q '"status":"ok"'; then
       return 0
     fi
     sleep 2
@@ -80,7 +83,8 @@ cmd_status() {
   "${COMPOSE[@]}" ps --format '  {{.Name}}  {{.Status}}'
   echo
   echo "== 对外入口 =="
-  curl -sk -m 5 https://127.0.0.1/api/v1/health | pretty
+  echo "  ${ENTRY}/api/v1/health"
+  curl -sk -m 5 "${ENTRY}/api/v1/health" | pretty
   echo
   echo "== 网关自检 =="
   api /internal/status | pretty
@@ -288,7 +292,10 @@ cmd_help() {
   shell <服务>                进容器
   backup                      备份 gateway-data 与 workspace 卷
 
-本机自测时若 8443 不可用，把 status/health 里的 127.0.0.1 换成实际入口地址。
+环境变量：
+  QINAN_ENTRY                 对外入口，默认 https://127.0.0.1
+                              在别的机器上跑本脚本时覆盖它，例如
+                              QINAN_ENTRY=https://agent.example.com ./ops.sh status
 USAGE
 }
 
