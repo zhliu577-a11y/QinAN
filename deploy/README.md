@@ -725,7 +725,7 @@ chmod 600 .env        # 里面有 JWT 与实例密码
 | `ADMIN_TOKEN` | 随机 | `openssl rand -hex 24` |
 | `OC1_PASSWORD` / `OC2_PASSWORD` / `OC3_PASSWORD` | 三把**互不相同**的随机值 | 各 `openssl rand -hex 24` |
 | `CALLBACK_HMAC_SECRET` | 随机；完全不用回调可以不管 | `openssl rand -hex 32` |
-| `CALLBACK_ALLOWED_HOSTS` | App 后端的域名，逗号分隔（**空着会拒掉所有回调**） | —— |
+| `CALLBACK_ALLOWED_HOSTS` | App 后端的域名，逗号分隔；回调地址**只允许 https**，这里空着会拒掉所有回调 | —— |
 | `EXCHANGE_HMAC_SECRET` | 只有用模式 B 才填，与 App 团队约定同一个值 | `openssl rand -hex 32` |
 | `MODEL_*` | 见 15.7 | —— |
 
