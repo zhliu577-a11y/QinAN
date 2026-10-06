@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <!-- 1. 服务地址 -->
+
+        <TextView style="@style/SectionTitle" android:text="@string/section_server" />
+
+        <EditText
+            android:id="@+id/etBaseUrl"
+            style="@style/Field"
+            android:hint="@string/hint_base_url"
+            android:inputType="textUri" />
+
+        <CheckBox
+            android:id="@+id/cbTrustAll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/label_trust_all" />
+
+        <!-- 2. 鉴权 -->
+
+        <TextView style="@style/SectionTitle" android:text="@string/section_auth" />
+
+        <RadioGroup
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <RadioButton
+                android:id="@+id/rbAuthPassword"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_auth_password" />
+
+            <RadioButton
+                android:id="@+id/rbAuthToken"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_auth_token" />
+        </RadioGroup>
+
+        <EditText
+            android:id="@+id/etUsername"
+            style="@style/Field"
+            android:hint="@string/hint_username"
+            android:inputType="text" />
+
+        <EditText
+            android:id="@+id/etPassword"
+            style="@style/Field"
+            android:hint="@string/hint_password"
+            android:inputType="textPassword" />
+
+        <EditText
+            android:id="@+id/etToken"
+            style="@style/Field"
+            android:hint="@string/hint_token"
+            android:inputType="text" />
+
+        <Button
+            android:id="@+id/btnLogin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_login" />
+
+        <!-- 3. 任务内容 -->
+
+        <TextView style="@style/SectionTitle" android:text="@string/section_task" />
+
+        <RadioGroup
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <RadioButton
+                android:id="@+id/rbKindUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_kind_url" />
+
+            <RadioButton
+                android:id="@+id/rbKindText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_kind_text" />
+        </RadioGroup>
+
+        <EditText
+            android:id="@+id/etUrl"
+            style="@style/Field"
+            android:hint="@string/hint_url"
+            android:inputType="textUri" />
+
+        <EditText
+            android:id="@+id/etText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_text"
+            android:gravity="top|start"
+            android:inputType="textMultiLine"
+            android:minLines="4" />
+
+        <EditText
+            android:id="@+id/etInstruction"
+            style="@style/Field"
+            android:hint="@string/hint_instruction"
+            android:inputType="text" />
+
+        <EditText
+            android:id="@+id/etMaxOutput"
+            style="@style/Field"
+            android:hint="@string/hint_max_output"
+            android:inputType="number" />
+
+        <EditText
+            android:id="@+id/etCallbackUrl"
+            style="@style/Field"
+            android:hint="@string/hint_callback_url"
+            android:inputType="textUri" />
+
+        <EditText
+            android:id="@+id/etClientTaskId"
+            style="@style/Field"
+            android:hint="@string/hint_client_task_id"
+            android:inputType="text" />
+
+        <EditText
+            android:id="@+id/etIdempotencyKey"
+            style="@style/Field"
+            android:hint="@string/hint_idempotency_key"
+            android:inputType="text" />
+
+        <!-- 4. 原始 JSON -->
+
+        <TextView style="@style/SectionTitle" android:text="@string/section_advanced" />
+
+        <CheckBox
+            android:id="@+id/cbRawJson"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/label_raw_json" />
+
+        <EditText
+            android:id="@+id/etRawJson"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:gravity="top|start"
+            android:hint="@string/hint_raw_json"
+            android:inputType="textMultiLine|textNoSuggestions"
+            android:minLines="6"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btnPreview"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_preview" />
+
+        <!-- 5. 发送与结果 -->
+
+        <TextView style="@style/SectionTitle" android:text="@string/section_run" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnSend"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/btn_send" />
+
+            <Button
+                android:id="@+id/btnCancel"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:enabled="false"
+                android:text="@string/btn_cancel" />
+        </LinearLayout>
+
+        <ProgressBar
+            android:id="@+id/progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:indeterminate="true"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btnCopyResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_copy_result" />
+
+        <TextView
+            style="@style/SectionTitle"
+            android:text="@string/label_status" />
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#11000000"
+            android:fontFamily="monospace"
+            android:minLines="5"
+            android:padding="6dp"
+            android:textIsSelectable="true"
+            android:textSize="12sp" />
+
+        <TextView
+            style="@style/SectionTitle"
+            android:text="@string/label_result" />
+
+        <TextView
+            android:id="@+id/tvResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#11000000"
+            android:minLines="6"
+            android:padding="6dp"
+            android:textIsSelectable="true"
+            android:textSize="14sp" />
+
+    </LinearLayout>
+</ScrollView>

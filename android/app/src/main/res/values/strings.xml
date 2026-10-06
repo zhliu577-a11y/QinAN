@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QinAN Agent</string>
+
+    <string name="section_server">1. 服务地址</string>
+    <string name="hint_base_url">https://your-host/api/v1</string>
+    <string name="label_trust_all">信任自签证书（内网 / 演练环境用）</string>
+
+    <string name="section_auth">2. 鉴权</string>
+    <string name="label_auth_password">账号密码换 Token</string>
+    <string name="label_auth_token">直接填 Token</string>
+    <string name="hint_username">用户名</string>
+    <string name="hint_password">密码</string>
+    <string name="hint_token">access_token</string>
+    <string name="btn_login">登录并取 Token</string>
+
+    <string name="section_task">3. 任务内容</string>
+    <string name="label_kind_url">抓网页（kind=url）</string>
+    <string name="label_kind_text">总结一段话（kind=text）</string>
+    <string name="hint_url">https://example.com/article</string>
+    <string name="hint_text">要总结的正文…</string>
+    <string name="hint_instruction">instruction（可选，例如：用三点总结）</string>
+    <string name="hint_max_output">max_output_chars（100~4000，默认 1200）</string>
+    <string name="hint_callback_url">callback_url（可选，必须 https）</string>
+    <string name="hint_client_task_id">client_task_id（可选，≤64 字符）</string>
+    <string name="hint_idempotency_key">Idempotency-Key（留空自动生成）</string>
+
+    <string name="section_advanced">4. 高级：直接改原始 JSON</string>
+    <string name="label_raw_json">启用原始 JSON 模式（勾选后以文本框内容为准）</string>
+    <string name="btn_preview">预览 JSON</string>
+    <string name="hint_raw_json">{ "kind": "url", "url": "https://example.com" }</string>
+
+    <string name="section_run">5. 发送</string>
+    <string name="btn_send">发送任务</string>
+    <string name="btn_cancel">停止轮询 / 取消任务</string>
+    <string name="btn_copy_result">复制结果</string>
+    <string name="label_status">日志</string>
+    <string name="label_result">结果（result_md）</string>
+</resources>

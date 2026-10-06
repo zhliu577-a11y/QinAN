@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 只用系统自带的 Material 主题，避免引入 AndroidX / Material 库。 -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light">
+        <item name="android:colorPrimary">#1565C0</item>
+        <item name="android:colorPrimaryDark">#0D47A1</item>
+        <item name="android:colorAccent">#1565C0</item>
+    </style>
+
+    <style name="SectionTitle">
+        <item name="android:textStyle">bold</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:paddingTop">14dp</item>
+        <item name="android:paddingBottom">4dp</item>
+    </style>
+
+    <style name="Field">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:inputType">text</item>
+    </style>
+</resources>

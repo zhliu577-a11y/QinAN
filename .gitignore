@@ -36,3 +36,6 @@ tmp/
 *.db-wal
 *.db-shm
 .smoke*
+
+# Android 测试端的构建产物
+android/build/

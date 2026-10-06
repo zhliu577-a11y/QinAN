@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  地址是用户在界面上自己填的，所以这里不锁域名：
+  - 允许明文 http（内网演练常见）
+  - 额外信任用户自己装的 CA（自签证书）
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

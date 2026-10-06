@@ -6,6 +6,9 @@
 引擎是 [opencode](https://opencode.ai)（开源终端 AI 智能体），以实例池方式部署；
 本项目提供**纯 HTTP API**，手机端 App 由其他人开发。
 
+仓库里 `android/` 下另有一个自用的**安卓测试端**（37 KB，不用 Android Studio 就能构建），
+用来在真机上填地址、改字段、点一下就把任务发出去，验收和联调时用它。
+
 ## 架构
 
 ```
@@ -67,6 +70,7 @@ curl -s https://你的域名/api/v1/health   # engine: ready
 | [`deploy/README.md`](deploy/README.md) | 部署与运维的细节和踩坑记录 |
 | [`docs/API.md`](docs/API.md) | 接口契约（给 App 团队） |
 | [`docs/方案设计.md`](docs/方案设计.md) | 设计取舍与背景 |
+| [`android/README.md`](android/README.md) | 自用安卓测试端：怎么构建、怎么装、怎么调接口 |
 
 ## 本地开发
 
